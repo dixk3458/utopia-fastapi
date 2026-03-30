@@ -16,6 +16,7 @@ class User(Base):
     )
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     password_hash: Mapped[str | None] = mapped_column(String(255))
+    name: Mapped[str] = mapped_column(String(50), nullable=True)
     nickname: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
 
     profile_image_key: Mapped[str | None] = mapped_column(String(255))
@@ -24,7 +25,7 @@ class User(Base):
     provider: Mapped[str] = mapped_column(String(30), nullable=False, server_default="local")
     provider_id: Mapped[str | None] = mapped_column(String(255))
 
-    role: Mapped[str] = mapped_column(String(20), nullable=False, server_default="user")
+    role: Mapped[str] = mapped_column(String(20), nullable=False, server_default="USER")
     trust_score: Mapped[float] = mapped_column(Numeric, nullable=False, server_default="36.5")
 
     referred_by: Mapped[uuid.UUID | None] = mapped_column(

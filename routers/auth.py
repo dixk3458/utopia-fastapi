@@ -101,6 +101,7 @@ async def me(
             "email": user.email,
             "nickname": user.nickname,
             "provider": user.provider,
+            "role": user.role,
         },
     }
 
@@ -244,8 +245,12 @@ async def login(
 
     return {
         "message": "로그인에 성공했습니다.",
-        "user": {"email": user.email, "nickname": user.nickname},
-    }
+        "user": {
+            "email": user.email,
+            "nickname": user.nickname,
+            "role": user.role,
+    },
+}
 
 
 @router.post("/logout")
