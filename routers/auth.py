@@ -92,7 +92,13 @@ async def me(
 
     return {
         "is_logged_in": True,
-        "user": {"user_id": str(user.id), "email": user.email, "nickname": user.nickname, "provider": user.provider},
+        "user": {
+            "user_id": str(user.id),
+            "email": user.email,
+            "nickname": user.nickname,
+            "provider": user.provider,
+            "role": user.role,
+        },
     }
 
 
@@ -167,7 +173,7 @@ async def signup(user: UserCreate, db: AsyncSession = Depends(get_db)):
 
 # ─── 일반 로그인 ─────────────────────────────────────────────────
 @router.post("/login")
-async def login(user_credentials: UserLogin, response: Response, db: AsyncSession = Depends(get_db)):
+async def login(request: Request,user_credentials: UserLogin, response: Response, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == user_credentials.email))
     user = result.scalar_one_or_none()
 
@@ -180,8 +186,20 @@ async def login(user_credentials: UserLogin, response: Response, db: AsyncSessio
     if not user.is_active:
         raise HTTPException(status_code=403, detail="비활성화된 계정입니다.")
 
-    await issue_tokens_and_save(response, db, user)
-    return {"message": "로그인에 성공했습니다.", "user": {"email": user.email, "nickname": user.nickname}}
+    await issue_tokens_and_save(
+        response=response,
+        db=db,
+        user=user,
+    )
+
+    return {
+        "message": "로그인에 성공했습니다.",
+        "user": {
+            "email": user.email,
+            "nickname": user.nickname,
+            "role": user.role,
+    },
+}
 
 
 # ─── 로그아웃 ────────────────────────────────────────────────────

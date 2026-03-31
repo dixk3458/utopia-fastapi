@@ -2,7 +2,8 @@ import asyncio
 from core.database import AsyncSessionLocal
 from core.security import hash_password
 from models.user import User
-from models.party import Category, Platform, Party
+from models.party import Party
+# from models.party import Category, Platform
 from models.notification import Notification
 from sqlalchemy import select, func
 
@@ -39,32 +40,32 @@ PLATFORMS = [
 
 async def seed():
     async with AsyncSessionLocal() as db:
-        cat_count = await db.scalar(select(func.count()).select_from(Category))
-        if cat_count and cat_count > 0:
-            print("⚠️  이미 데이터가 있습니다.")
-            return
+        # cat_count = await db.scalar(select(func.count()).select_from(Category))
+        # if cat_count and cat_count > 0:
+        #     print("⚠️  이미 데이터가 있습니다.")
+        #     return
 
-        for c in CATEGORIES:
-            db.add(Category(**c))
-        await db.flush()
+        # for c in CATEGORIES:
+        #     db.add(Category(**c))
+        # await db.flush()
 
-        for p in PLATFORMS:
-            db.add(Platform(**p))
-        await db.flush()
+        # for p in PLATFORMS:
+        #     db.add(Platform(**p))
+        # await db.flush()
 
-        user = User(email="test@partyup.kr", name="테스터", nickname="테스터닉", password_hash=hash_password("password123"))
+        user = User(email="test@partyup.kr", name="테스터", nickname="테스터닉", password_hash=hash_password("password123"), role="ADMIN")
         db.add(user)
         await db.flush()
 
-        for p in [
-            {"platform_id": 1, "title": "Netflix 프리미엄 4인 파티", "status": "RECRUITING"},
-            {"platform_id": 5, "title": "멜론 스트리밍 같이 써요", "status": "RECRUITING"},
-            {"platform_id": 12, "title": "ChatGPT Plus 공동 결제", "status": "RECRUITING"},
-            {"platform_id": 9, "title": "클래스101 강의 공동구매", "status": "RECRUITING"},
-        ]:
-            db.add(Party(host_id=user.user_id, **p))
+        # for p in [
+        #     {"platform_id": 1, "title": "Netflix 프리미엄 4인 파티", "status": "RECRUITING"},
+        #     {"platform_id": 5, "title": "멜론 스트리밍 같이 써요", "status": "RECRUITING"},
+        #     {"platform_id": 12, "title": "ChatGPT Plus 공동 결제", "status": "RECRUITING"},
+        #     {"platform_id": 9, "title": "클래스101 강의 공동구매", "status": "RECRUITING"},
+        # ]:
+        #     db.add(Party(id=user.id, **p))
 
-        db.add(Notification(user_id=None, type="SYSTEM", content="신뢰도 시스템 업데이트 안내입니다.", is_read=False))
+        # db.add(Notification(id=None, type="SYSTEM", content="신뢰도 시스템 업데이트 안내입니다.", is_read=False))
         await db.commit()
         print("✅ 완료! 테스트 계정: test@partyup.kr / password123")
 
