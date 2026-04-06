@@ -40,22 +40,24 @@ jobs:
 
       - name: Clone repo if not exists
         run: |
-          ssh fastapi << 'ENDSSH'
-            if [ ! -d ~/fastapi/utopia-fastapi-main/.git ]; then
-              mkdir -p ~/fastapi
-              git clone https://github.com/Utopia-party/utopia-fastapi.git ~/fastapi/utopia-fastapi-main
+          ssh fastapi 'bash -s' << 'ENDSSH'
+            if [ ! -d /home/ubuntu/fastapi/utopia-fastapi-main/.git ]; then
+              mkdir -p /home/ubuntu/fastapi
+              git clone https://github.com/Utopia-party/utopia-fastapi.git /home/ubuntu/fastapi/utopia-fastapi-main
+            else
+              echo "✅ 이미 clone 되어있음, 스킵"
             fi
           ENDSSH
 
       - name: Copy env file to server
         run: |
-          scp -o ProxyJump=bastion /tmp/env_file fastapi:~/fastapi/utopia-fastapi-main/.env
+          scp -o ProxyJump=bastion /tmp/env_file fastapi:/home/ubuntu/fastapi/utopia-fastapi-main/.env
 
       - name: Deploy
         run: |
-          ssh fastapi << 'ENDSSH'
+          ssh fastapi 'bash -s' << 'ENDSSH'
             set -e
-            cd ~/fastapi/utopia-fastapi-main
+            cd /home/ubuntu/fastapi/utopia-fastapi-main
             git pull origin main
 
             source venv/bin/activate
@@ -67,7 +69,7 @@ jobs:
             nohup uvicorn main:app \
               --host 0.0.0.0 \
               --port 8000 \
-              >> ~/fastapi/utopia-fastapi-main/server.log 2>&1 &
+              >> /home/ubuntu/fastapi/utopia-fastapi-main/server.log 2>&1 &
 
             echo "✅ 배포 완료 $(date)"
           ENDSSH
