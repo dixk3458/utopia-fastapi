@@ -1282,6 +1282,7 @@ async def _fetch_captcha_set_from_db() -> dict[str, Any] | None:
                         "id": f"p-{pos}",
                         "url": key,           # raw key
                         "index": pos,
+                        "category": cat,      # 서버 verify에서 selected_categories 비교 시 필요 (DB 캐시 경로 버그 수정)
                         "_bucket": settings.MINIO_PHOTO_BUCKET,
                     })
 
