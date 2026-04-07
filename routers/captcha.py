@@ -121,7 +121,7 @@ def safe_float(value: Any):
         return None
 
 
-@router.post("/api/captcha/handocr/start")  # 상원
+@router.post("/handocr/start")  # 상원
 async def start_captcha():
     # 상원: 2차 handOCR 캡챠 시작 시 문제 문자열과 손 포즈를 세션으로 발급합니다.
     chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -144,7 +144,7 @@ async def start_captcha():
     }
 
 
-@router.post("/api/captcha/handocr/verify")  # 상원
+@router.post("/handocr/verify")  # 상원
 async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(...)):
     # 상원: 업로드 이미지를 GPU 서버에 보내 손 포즈와 OCR 결과를 검증합니다.
     session_str = await redis_client.get(f"captcha:{sessionId}")
