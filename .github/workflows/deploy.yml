@@ -1,0 +1,82 @@
+name: Deploy FastAPI
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          cat > ~/.ssh/config << 'EOF'
+          Host bastion
+            HostName 210.109.15.10
+            User ubuntu
+            IdentityFile ~/.ssh/id_rsa
+            StrictHostKeyChecking no
+
+          Host fastapi
+            HostName 10.10.0.11
+            User ubuntu
+            IdentityFile ~/.ssh/id_rsa
+            ProxyJump bastion
+            StrictHostKeyChecking no
+          EOF
+
+      - name: Write env file
+        env:
+          ENV_CONTENT: ${{ secrets.ENV_FILE }}
+        run: |
+          printf '%s' "$ENV_CONTENT" > /tmp/env_file
+
+      - name: Clone repo if not exists
+        run: |
+          ssh fastapi 'bash -s' << 'ENDSSH'
+            if [ ! -d /home/ubuntu/fastapi/utopia-fastapi-main/.git ]; then
+              rm -rf /home/ubuntu/fastapi/utopia-fastapi-main
+              mkdir -p /home/ubuntu/fastapi
+              git clone https://github.com/Utopia-party/utopia-fastapi.git /home/ubuntu/fastapi/utopia-fastapi-main
+            else
+              echo "✅ 이미 clone 되어있음, 스킵"
+            fi
+          ENDSSH
+
+      - name: Copy env file to server
+        run: |
+          scp -o ProxyJump=bastion /tmp/env_file fastapi:/home/ubuntu/fastapi/utopia-fastapi-main/.env
+
+      - name: Deploy
+        run: |
+          ssh fastapi 'bash -s' << 'ENDSSH'
+            set -e
+            cd /home/ubuntu/fastapi/utopia-fastapi-main
+            git pull origin main
+
+            if [ ! -d venv ]; then
+              python3 -m venv venv
+            fi
+
+            source venv/bin/activate
+            pip install -r requirements.txt
+
+            pkill -f "uvicorn main:app" || true
+            sleep 2
+
+            nohup uvicorn main:app \
+              --host 0.0.0.0 \
+              --port 8000 \
+              >> /home/ubuntu/fastapi/utopia-fastapi-main/server.log 2>&1 &
+
+            echo "✅ 배포 완료 $(date)"
+          ENDSSH

@@ -73,8 +73,8 @@ _image_cache: dict[tuple[str, str], tuple[bytes, str]] = {}
 # 문제 세트 생성용 동물 이미지 메타데이터
 # ─────────────────────────────────────────────
 
-#도상원
-# MinIO 클라이언트 초기화
+# 상원: FR-118 문제 세트 생성을 위해 captcha-emojis, captcha-photos 버킷에서 이미지를 읽어옵니다.
+# 상원: 앱 시작 시 한 번만 로드해 challenge 생성 때 빠르게 재사용합니다.
 minio_client = Minio(
     settings.MINIO_ENDPOINT,
     access_key=settings.MINIO_ACCESS_KEY,
@@ -133,7 +133,6 @@ def _load_all_assets() -> tuple[dict[str, list[str]], dict[str, list[str]]]:
 
 
 EMOJI_ASSET_LIBRARY, PHOTO_ASSET_LIBRARY = _load_all_assets()
-#도상원
 
 
 # ─────────────────────────────────────────────
@@ -575,7 +574,7 @@ def _build_minio_url(bucket: str, object_name: str) -> str:
     """MinIO 오브젝트의 직접 접근 URL 생성 (서버 내부용)"""
     endpoint = settings.MINIO_ENDPOINT
     protocol = "https" if settings.MINIO_SECURE else "http"
-    return f"{protocol}://{endpoint}/{bucket}/{quote(object_name, safe='/')}"
+    return f"{protocol}://{public_endpoint}/{bucket}/{quote(object_name, safe='/')}"
 
 
 # ─────────────────────────────────────────────
@@ -694,10 +693,11 @@ async def _build_new_challenge_payload(
     emoji_lib = EMOJI_ASSET_LIBRARY if EMOJI_ASSET_LIBRARY else PHOTO_ASSET_LIBRARY
     photo_lib = PHOTO_ASSET_LIBRARY
 
+    # 이모지가 없는 카테고리는 실사 이미지로 대체 (임시)
     available_categories = [
         category
         for category in SUPPORTED_CHALLENGE_CATEGORIES
-        if photo_lib.get(category) and emoji_lib.get(category)
+        if photo_lib.get(category)
     ]
 
     if len(available_categories) < 3:
@@ -1005,6 +1005,7 @@ async def initiate_captcha(payload: CaptchaInitRequest, request: Request) -> Cap
     return CaptchaInitResponse(status="challenge", session_id=session_id)
 
 
+# ── 수정됨: get_challenge에 디버그 print 추가 ─────────────────
 async def get_challenge(session_id: str, request: Request) -> CaptchaChallengeResponse:
     session = await _load_json(_session_key(session_id))
     if not session:
@@ -1014,10 +1015,15 @@ async def get_challenge(session_id: str, request: Request) -> CaptchaChallengeRe
         )
 
     client_ip = extract_client_ip(request)
-    if session.get("client_ip") != client_ip:
+    session_ip = session.get("client_ip")
+    print(f"[DEBUG] get_challenge: session_ip={session_ip}, request_ip={client_ip}")
+    print(f"[DEBUG] Headers: {dict(request.headers)}")
+
+    if session_ip != client_ip:
+        print(f"[DEBUG] IP MISMATCH!")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="세션을 발급받은 클라이언트와 현재 요청이 일치하지 않습니다.",
+            detail=f"IP 불일치: session={session_ip}, request={client_ip}",
         )
 
     if session.get("status") != "challenge":
@@ -1062,14 +1068,45 @@ async def verify_challenge(payload: CaptchaVerifyRequest, request: Request) -> C
     issued_at = float(session.get("challenge_issued_at", session.get("created_at", _now_time())))
     solve_seconds = max(_now_time() - issued_at, 0.0)
 
+    # 상원: 현재 세션이 몇 번째 시도인지 계산해 남은 횟수 응답에 사용합니다.
     attempts = int(session.get("attempts", 0))
-    answer_indices = session.get("answer_indices", [])
+    # 상원: 기존 answer_indices는 디버그용으로 남기고, 실제 정답 판정은 이모지의 동물 순서 기준으로 다시 계산합니다.
+    answer_indices = session.get("answer_indices", [])  # 상원
+    # 상원: 위쪽 이모지 3개의 동물 순서를 추출해 사용자가 맞춰야 할 정답 순서를 만듭니다.
+    expected_categories = [emoji.get("category") for emoji in session.get("emojis", [])]  # 상원
+    # 상원: 아래 사진 9칸의 index를 실제 동물 category와 연결하는 사전을 만듭니다.
+    photo_category_by_index = {  # 상원
+        int(photo.get("index")): photo.get("category")  # 상원
+        for photo in session.get("photos", [])  # 상원
+    }  # 상원
+    # 상원: 사용자가 누른 칸 번호를 실제 동물 카테고리 순서로 바꿔서 화면 문구와 같은 기준으로 검증합니다.
+    selected_categories = [  # 상원
+        photo_category_by_index.get(selected_index)  # 상원
+        for selected_index in payload.selected_indices  # 상원
+    ]  # 상원
 
-    is_correct = (
-        len(payload.selected_indices) == len(answer_indices)
-        and payload.selected_indices == answer_indices
-    )
+    # 상원: 중복 클릭을 막고, 선택한 동물 순서가 이모지 순서와 완전히 같을 때만 정답 처리합니다.
+    is_correct = (  # 상원
+        # 상원: 먼저 사용자가 정확히 3칸을 골랐는지 길이를 검사합니다.
+        len(payload.selected_indices) == len(expected_categories)  # 상원
+        # 상원: 같은 칸을 두 번 누른 경우는 정답으로 인정하지 않으려고 중복을 막습니다.
+        and len(payload.selected_indices) == len(set(payload.selected_indices))  # 상원
+        # 상원: 최종적으로 사용자가 고른 동물 순서가 이모지 정답 순서와 완전히 같은지 비교합니다.
+        and selected_categories == expected_categories  # 상원
+    )  # 상원
 
+    # 상원: 실제 서버가 무엇을 정답으로 봤는지 콘솔에서 바로 비교할 수 있도록 디버그 로그를 남깁니다.
+    print(  # 상원
+        "[DEBUG] verify_challenge:",  # 상원
+        {  # 상원
+            "selected_indices": payload.selected_indices,  # 상원
+            "answer_indices": answer_indices,  # 상원
+            "selected_categories": selected_categories,  # 상원
+            "expected_categories": expected_categories,  # 상원
+        },  # 상원
+    )  # 상원
+
+    # 상원: 사람이 아니라 스크립트로 너무 빠르게 푸는 경우를 막으려고 최소 풀이 시간도 함께 검사합니다.
     if solve_seconds < CAPTCHA_MIN_SOLVE_SECONDS:
         is_correct = False
 
