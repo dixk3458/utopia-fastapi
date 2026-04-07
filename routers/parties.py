@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from core.database import get_db
-from core.security import require_user
+from core.security import require_user, get_current_user_optional
 from models.party import Party, PartyMember, Service
 from models.user import User
 from schemas import (
@@ -23,12 +23,19 @@ from schemas import (
 router = APIRouter(prefix="/parties", tags=["parties"])
 logger = logging.getLogger(__name__)
 
-def _build_party_out(party: Party) -> PartyOut:
+def _build_party_out(party: Party, current_user_id: Optional[uuid.UUID] = None) -> PartyOut:
     """
-    Party 객체를 PartyOut 스키마로 변환합니다.
-    주의: 호출 전에 service, host, members가 selectinload 되어 있어야 합니다.
+    Party 객체를 PartyOut 스키마로 변환하며, 현재 유저의 참여 여부를 계산합니다.
     """
     svc = party.service
+    
+    # 참여 여부 판별: 방장이거나 멤버 목록에 포함되어 있는지 확인
+    is_joined = False
+    if current_user_id:
+        is_leader = party.leader_id == current_user_id
+        is_member = any(m.user_id == current_user_id for m in party.members) if party.members else False
+        is_joined = is_leader or is_member
+
     return PartyOut(
         id=party.id,
         leader_id=party.leader_id,
@@ -42,37 +49,8 @@ def _build_party_out(party: Party) -> PartyOut:
         monthly_price=svc.monthly_price if svc else None,
         logo_image_key=svc.logo_image_key if svc else None,
         member_count=len(party.members) if party.members is not None else 0,
+        is_joined=is_joined # ✅ 프론트에서 버튼 분기 처리에 사용
     )
-
-
-@router.get("/categories", response_model=list[CategoryOut], tags=["categories"])
-async def list_categories(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Service)
-        .where(Service.is_active == True)  # noqa
-        .order_by(Service.category, Service.name)
-    )
-    services = result.scalars().all()
-    seen: set[str] = set()
-    categories = []
-    for s in services:
-        if s.category not in seen:
-            seen.add(s.category)
-            categories.append(CategoryOut(category_id=s.id, category_name=s.category))
-    return categories
-
-
-@router.get("/services", response_model=list[ServiceOut], tags=["services"])
-async def list_services(
-    category: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_db),
-):
-    q = select(Service).where(Service.is_active == True).order_by(Service.name)  # noqa
-    if category:
-        q = q.where(Service.category == category)
-    result = await db.execute(q)
-    return result.scalars().all()
-
 
 @router.get("", response_model=PartyListOut)
 async def list_parties(
@@ -82,6 +60,7 @@ async def list_parties(
     page: int = Query(1, ge=1),
     size: int = Query(12, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional)
 ):
     q = (
         select(Party)
@@ -107,16 +86,21 @@ async def list_parties(
     result = await db.execute(q)
     parties = result.scalars().all()
 
+    user_id = current_user.id if current_user else None
+
     return PartyListOut(
-        parties=[_build_party_out(p) for p in parties],
+        parties=[_build_party_out(p, user_id) for p in parties],
         total=total,
         page=page,
         size=size
     )
 
-
 @router.get("/{party_id}", response_model=PartyOut)
-async def get_party(party_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_party(
+    party_id: uuid.UUID, 
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional)
+):
     result = await db.execute(
         select(Party)
         .options(
@@ -129,8 +113,9 @@ async def get_party(party_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     party = result.scalar_one_or_none()
     if not party:
         raise HTTPException(status_code=404, detail="파티를 찾을 수 없습니다.")
-    return _build_party_out(party)
-
+    
+    user_id = current_user.id if current_user else None
+    return _build_party_out(party, user_id)
 
 @router.post("", response_model=PartyOut, status_code=status.HTTP_201_CREATED)
 async def create_party(
@@ -138,7 +123,6 @@ async def create_party(
     current_user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # 파티 생성
     party = Party(
         leader_id=current_user.id,
         service_id=body.service_id,
@@ -146,12 +130,8 @@ async def create_party(
         status="recruiting",
     )
     db.add(party)
-    
-    # 방장도 멤버로 자동 추가하고 싶다면 여기에 PartyMember 추가 로직을 넣을 수 있습니다.
-    
     await db.commit()
     
-    # 생성된 파티 정보를 관계 모델과 함께 다시 조회
     result = await db.execute(
         select(Party)
         .options(
@@ -161,8 +141,7 @@ async def create_party(
         )
         .where(Party.id == party.id)
     )
-    return _build_party_out(result.scalar_one())
-
+    return _build_party_out(result.scalar_one(), current_user.id)
 
 @router.post("/{party_id}/join", response_model=MessageOut)
 async def join_party(
@@ -170,7 +149,6 @@ async def join_party(
     current_user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # 1. 파티 존재 여부와 서비스 정보를 한 번에 조회 (Lazy Loading 방지)
     result = await db.execute(
         select(Party)
         .options(selectinload(Party.service))
@@ -184,7 +162,6 @@ async def join_party(
     if party.leader_id == current_user.id:
         raise HTTPException(status_code=400, detail="자신이 개설한 파티입니다.")
 
-    # 2. 이미 참여 중인지 확인
     existing_check = await db.execute(
         select(PartyMember).where(
             PartyMember.party_id == party_id,
@@ -194,7 +171,6 @@ async def join_party(
     if existing_check.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="이미 참여한 파티입니다.")
 
-    # 3. 정원 초과 여부 확인
     if party.service:
         count_result = await db.execute(
             select(func.count()).select_from(PartyMember).where(PartyMember.party_id == party_id)
@@ -203,7 +179,6 @@ async def join_party(
         if current_count >= party.service.max_members:
             raise HTTPException(status_code=400, detail="파티 인원이 가득 찼습니다.")
 
-    # 4. 멤버 추가
     try:
         new_member = PartyMember(party_id=party_id, user_id=current_user.id)
         db.add(new_member)
