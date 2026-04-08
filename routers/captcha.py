@@ -71,25 +71,28 @@ ALL_POSES = [
 MAX_ATTEMPTS = 5
 
 
-# PostgreSQL 연결 정보
-# 예:
-# settings.POSTGRES_DSN = "postgresql://user:password@10.10.0.12:5432/appdb"
-POSTGRES_DSN = settings.POSTGRES_DSN
+DATABASE_URL = settings.DATABASE_URL
 
 _db_pool: Optional[asyncpg.Pool] = None
+
+
+def normalize_asyncpg_dsn(database_url: str) -> str:
+    if database_url.startswith("postgresql+asyncpg://"):
+        return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    return database_url
 
 
 async def get_db_pool() -> asyncpg.Pool:
     global _db_pool
     if _db_pool is None:
+        dsn = normalize_asyncpg_dsn(DATABASE_URL)
         _db_pool = await asyncpg.create_pool(
-            dsn=POSTGRES_DSN,
+            dsn=dsn,
             min_size=1,
             max_size=5,
             command_timeout=10,
         )
     return _db_pool
-
 
 def build_ai_failure_message(gpu_result: dict, remaining_attempts: int) -> str:
     error_code = gpu_result.get("error_code", "UNKNOWN_ERROR")
