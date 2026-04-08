@@ -1,9 +1,9 @@
 import uuid
-from sqlalchemy import String, Integer, Boolean, DateTime, Text, ForeignKey, func, text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from core.database import Base
-from datetime import datetime
+from datetime import date, datetime
 
 
 class Party(Base):
@@ -19,7 +19,15 @@ class Party(Base):
         UUID(as_uuid=True), ForeignKey("services.id"), nullable=False
     )
     title: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    max_members: Mapped[int | None] = mapped_column(Integer)
+    current_members: Mapped[int | None] = mapped_column(Integer)
+    monthly_per_person: Mapped[int | None] = mapped_column(Integer)
+    account_id: Mapped[str | None] = mapped_column(String(255))
+    account_password: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="recruiting")
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -89,6 +97,9 @@ class Service(Base):
     monthly_price: Mapped[int] = mapped_column(Integer, nullable=False)
     logo_image_key: Mapped[str | None] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    commission_rate: Mapped[float | None] = mapped_column(Float)
+    leader_discount_rate: Mapped[float | None] = mapped_column(Float)
+    referral_discount_rate: Mapped[float | None] = mapped_column(Float)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     # ✅ Fix: DateTime → DateTime(timezone=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
