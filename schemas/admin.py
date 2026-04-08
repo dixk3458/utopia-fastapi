@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DashboardMetricOut(BaseModel):
@@ -24,14 +24,64 @@ class AdminRoleRecordOut(BaseModel):
     id: str
     userId: str
     adminId: str
-    role: str
-    scope: str
+    canManageUsers: bool
+    canManageParties: bool
+    canManageReports: bool
+    canManageModeration: bool
+    canApproveReceipts: bool
+    canApproveSettlements: bool
+    canViewLogs: bool
+    canManageAdmins: bool
     lastUpdated: str
     updatedBy: str
 
 
 class AdminRoleUpdateIn(BaseModel):
-    role: str
+    canManageUsers: bool
+    canManageParties: bool
+    canManageReports: bool
+    canManageModeration: bool
+    canApproveReceipts: bool
+    canApproveSettlements: bool
+    canViewLogs: bool
+    canManageAdmins: bool
+
+
+class AdminPermissionOut(BaseModel):
+    canManageUsers: bool
+    canManageParties: bool
+    canManageReports: bool
+    canManageModeration: bool
+    canApproveReceipts: bool
+    canApproveSettlements: bool
+    canViewLogs: bool
+    canManageAdmins: bool
+
+
+class AdminServiceRecordOut(BaseModel):
+    id: str
+    name: str
+    category: str
+    maxMembers: int
+    monthlyPrice: int
+    logoImageKey: str | None = None
+    isActive: bool
+    createdBy: str
+    createdAt: str
+    updatedAt: str
+    commissionRate: float
+    leaderDiscountRate: float
+    referralDiscountRate: float
+
+
+class AdminServiceUpdateIn(BaseModel):
+    maxMembers: int = Field(ge=1)
+    monthlyPrice: int = Field(ge=0)
+    logoImageKey: str | None = None
+    isActive: bool
+    commissionRate: float = Field(ge=0, le=1)
+    leaderDiscountRate: float = Field(ge=0, le=1)
+    referralDiscountRate: float = Field(ge=0, le=1)
 
 
 class AdminUserRecordOut(BaseModel):

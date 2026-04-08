@@ -13,7 +13,7 @@ from jose import JWTError, jwt
 from core.config import settings
 from core.database import AsyncSessionLocal, Base, engine
 from models.admin import ActivityLog
-from routers import admin, auth, captcha, chat, notifications, parties, user_interests
+from routers import admin, auth, captcha, chat, notifications, parties
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -124,7 +124,6 @@ app.include_router(parties.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(captcha.router, prefix="/api", tags=["Captcha"])
-app.include_router(user_interests.router, prefix="/api")
 # 상원: 관리자 페이지가 실제 데이터를 읽고 상태를 바꿀 수 있도록 관리자 라우터를 연결합니다.
 app.include_router(admin.router, prefix="/api")  # 상원
 

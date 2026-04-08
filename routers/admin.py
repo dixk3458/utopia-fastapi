@@ -26,8 +26,11 @@ from schemas.admin import (
     AdminDashboardOut,
     AdminPartyActionIn,
     AdminPartyRecordOut,
+    AdminPermissionOut,
     AdminRoleRecordOut,
     AdminRoleUpdateIn,
+    AdminServiceRecordOut,
+    AdminServiceUpdateIn,
     AdminStatusUpdateIn,
     AdminUserDetailOut,
     AdminUserRecordOut,
@@ -76,13 +79,6 @@ def _to_int(value: Decimal | int | float | None) -> int:
     return int(value)
 
 
-def _admin_scope_for_role(role: str) -> str:
-    role = role.upper()
-    if role == "ROOT":
-        return "전체 시스템 / 승인 / 정책"
-    return "전체 운영 권한"
-
-
 def _admin_permissions_for_role(role: str) -> dict[str, Any]:
     role = role.upper()
     if role == "ROOT":
@@ -106,10 +102,6 @@ def _admin_permissions_for_role(role: str) -> dict[str, Any]:
         "can_view_logs": True,
         "can_manage_admins": False,
     }
-
-
-def _admin_role_code(role: AdminRole) -> str:
-    return "ROOT" if role.can_manage_admins else "ADMIN"
 
 
 def _manual_status_label(action_type: str | None) -> str | None:
@@ -233,6 +225,82 @@ async def _append_system_log(
     db.add(SystemLog(level=level, service=service, message=message, actor=actor))
 
 
+def _admin_permissions_payload(payload: AdminRoleUpdateIn) -> dict[str, bool]:
+    return {
+        "can_manage_users": payload.canManageUsers,
+        "can_manage_parties": payload.canManageParties,
+        "can_manage_reports": payload.canManageReports,
+        "can_manage_moderation": payload.canManageModeration,
+        "can_approve_receipts": payload.canApproveReceipts,
+        "can_approve_settlements": payload.canApproveSettlements,
+        "can_view_logs": payload.canViewLogs,
+        "can_manage_admins": payload.canManageAdmins,
+    }
+
+
+def _has_any_admin_permission(values: dict[str, bool]) -> bool:
+    return any(values.values())
+
+
+def _serialize_admin_permissions(role: AdminRole) -> AdminPermissionOut:
+    return AdminPermissionOut(
+        canManageUsers=role.can_manage_users,
+        canManageParties=role.can_manage_parties,
+        canManageReports=role.can_manage_reports,
+        canManageModeration=role.can_manage_moderation,
+        canApproveReceipts=role.can_approve_receipts,
+        canApproveSettlements=role.can_approve_settlements,
+        canViewLogs=role.can_view_logs,
+        canManageAdmins=role.can_manage_admins,
+    )
+
+
+def _serialize_admin_role(role: AdminRole, user: User, created_by: User | None) -> AdminRoleRecordOut:
+    return AdminRoleRecordOut(
+        id=str(role.id),
+        userId=str(user.id),
+        adminId=user.nickname or user.email,
+        canManageUsers=role.can_manage_users,
+        canManageParties=role.can_manage_parties,
+        canManageReports=role.can_manage_reports,
+        canManageModeration=role.can_manage_moderation,
+        canApproveReceipts=role.can_approve_receipts,
+        canApproveSettlements=role.can_approve_settlements,
+        canViewLogs=role.can_view_logs,
+        canManageAdmins=role.can_manage_admins,
+        lastUpdated=_format_datetime(role.updated_at),
+        updatedBy=(created_by.nickname or created_by.email) if created_by else "system",
+    )
+
+
+def _serialize_admin_service(service: Service, created_by: User | None) -> AdminServiceRecordOut:
+    return AdminServiceRecordOut(
+        id=str(service.id),
+        name=service.name,
+        category=service.category,
+        maxMembers=service.max_members,
+        monthlyPrice=service.monthly_price,
+        logoImageKey=service.logo_image_key,
+        isActive=service.is_active,
+        createdBy=(created_by.nickname or created_by.email) if created_by else "-",
+        createdAt=_format_datetime(service.created_at),
+        updatedAt=_format_datetime(service.updated_at),
+        commissionRate=float(service.commission_rate or 0),
+        leaderDiscountRate=float(service.leader_discount_rate or 0),
+        referralDiscountRate=float(service.referral_discount_rate or 0),
+    )
+
+
+def _assert_admin_permission(
+    admin: AdminContext,
+    permission_name: str,
+    detail: str,
+) -> AdminContext:
+    if not getattr(admin.role, permission_name):
+        raise HTTPException(status_code=403, detail=detail)
+    return admin
+
+
 def _latest_user_status_actions_subquery():
     ranked_actions = (
         select(
@@ -301,6 +369,48 @@ async def require_admin_context(
         )
     role = await _ensure_admin_role(db, current_user)
     return AdminContext(user=current_user, role=role)
+
+
+async def require_admin_user_permission(
+    admin: AdminContext = Depends(require_admin_context),
+) -> AdminContext:
+    return _assert_admin_permission(admin, "can_manage_users", "사용자 관리 권한이 없습니다.")
+
+
+async def require_admin_party_permission(
+    admin: AdminContext = Depends(require_admin_context),
+) -> AdminContext:
+    return _assert_admin_permission(admin, "can_manage_parties", "파티 관리 권한이 없습니다.")
+
+
+async def require_admin_report_permission(
+    admin: AdminContext = Depends(require_admin_context),
+) -> AdminContext:
+    return _assert_admin_permission(admin, "can_manage_reports", "신고 관리 권한이 없습니다.")
+
+
+async def require_admin_receipt_permission(
+    admin: AdminContext = Depends(require_admin_context),
+) -> AdminContext:
+    return _assert_admin_permission(admin, "can_approve_receipts", "영수증 승인 권한이 없습니다.")
+
+
+async def require_admin_settlement_permission(
+    admin: AdminContext = Depends(require_admin_context),
+) -> AdminContext:
+    return _assert_admin_permission(admin, "can_approve_settlements", "정산 승인 권한이 없습니다.")
+
+
+async def require_admin_log_permission(
+    admin: AdminContext = Depends(require_admin_context),
+) -> AdminContext:
+    return _assert_admin_permission(admin, "can_view_logs", "시스템 로그 조회 권한이 없습니다.")
+
+
+async def require_admin_role_permission(
+    admin: AdminContext = Depends(require_admin_context),
+) -> AdminContext:
+    return _assert_admin_permission(admin, "can_manage_admins", "관리자 권한 변경 권한이 없습니다.")
 
 
 @router.get("/dashboard", response_model=AdminDashboardOut)
@@ -381,9 +491,16 @@ async def get_admin_dashboard(
     )
 
 
+@router.get("/me", response_model=AdminPermissionOut)
+async def get_admin_me(
+    admin: AdminContext = Depends(require_admin_context),
+):
+    return _serialize_admin_permissions(admin.role)
+
+
 @router.get("/roles", response_model=list[AdminRoleRecordOut])
 async def get_admin_roles(
-    _: AdminContext = Depends(require_admin_context),
+    _: AdminContext = Depends(require_admin_role_permission),
     db: AsyncSession = Depends(get_db),
 ):
     creator = aliased(User)
@@ -395,50 +512,34 @@ async def get_admin_roles(
     )
     rows = result.all()
 
-    return [
-        AdminRoleRecordOut(
-            id=str(role.id),
-            userId=str(user.id),
-            adminId=user.nickname or user.email,
-            role=_admin_role_code(role),
-            scope=_admin_scope_for_role(_admin_role_code(role)),
-            lastUpdated=_format_datetime(role.updated_at),
-            updatedBy=(created_by.nickname or created_by.email) if created_by else "system",
-        )
-        for role, user, created_by in rows
-    ]
+    return [_serialize_admin_role(role, user, created_by) for role, user, created_by in rows]
 
 
 @router.put("/roles/{user_id}", response_model=AdminRoleRecordOut)
 async def update_admin_role(
     user_id: str,
     payload: AdminRoleUpdateIn,
-    admin: AdminContext = Depends(require_admin_context),
+    admin: AdminContext = Depends(require_admin_role_permission),
     db: AsyncSession = Depends(get_db),
 ):
-    if not admin.role.can_manage_admins:
-        raise HTTPException(status_code=403, detail="ROOT 관리자만 권한을 변경할 수 있습니다.")
-
     target_user = await db.get(User, user_id)
     if not target_user:
         raise HTTPException(status_code=404, detail="관리자 대상으로 지정한 사용자가 없습니다.")
 
-    role_code = "ROOT" if payload.role.upper() == "ROOT" else "ADMIN"
-    if role_code not in {"ROOT", "ADMIN"}:
-        raise HTTPException(status_code=400, detail="허용되지 않은 관리자 역할입니다.")
+    next_permissions = _admin_permissions_payload(payload)
+    if not _has_any_admin_permission(next_permissions):
+        raise HTTPException(status_code=400, detail="최소 하나 이상의 관리자 권한이 필요합니다.")
 
     result = await db.execute(select(AdminRole).where(AdminRole.user_id == target_user.id))
     role_row = result.scalar_one_or_none()
-    current_role_code = _admin_role_code(role_row) if role_row else "ADMIN"
-    defaults = _admin_permissions_for_role(role_code)
 
-    if target_user.id == admin.user.id and role_code != current_role_code:
+    if target_user.id == admin.user.id:
         raise HTTPException(
             status_code=400,
             detail="본인 관리자 권한은 직접 변경할 수 없습니다.",
         )
 
-    if current_role_code == "ROOT" and role_code != "ROOT":
+    if role_row and role_row.can_manage_admins and not next_permissions["can_manage_admins"]:
         if await _count_root_admins(db) <= 1:
             raise HTTPException(
                 status_code=400,
@@ -450,11 +551,11 @@ async def update_admin_role(
         role_row = AdminRole(
             user_id=target_user.id,
             created_by=admin.user.id,
-            **defaults,
+            **next_permissions,
         )
         db.add(role_row)
     else:
-        for key, value in defaults.items():
+        for key, value in next_permissions.items():
             setattr(role_row, key, value)
         if role_row.created_by is None:
             role_row.created_by = admin.user.id
@@ -463,33 +564,25 @@ async def update_admin_role(
         db,
         actor_user_id=admin.user.id,
         action_type="admin_role_updated",
-        description=f"{target_user.nickname} 권한을 {role_code}로 변경",
+        description=f"{target_user.nickname} 관리자 권한 세트를 변경",
         path=f"/api/admin/roles/{user_id}",
     )
     await _append_system_log(
         db,
         level="INFO",
         service="admin",
-        message=f"관리자 권한 변경: {target_user.nickname} -> {role_code}",
+        message=f"관리자 권한 변경: {target_user.nickname}",
         actor=admin.user.nickname,
     )
     await db.commit()
     await db.refresh(role_row)
 
-    return AdminRoleRecordOut(
-        id=str(role_row.id),
-        userId=str(target_user.id),
-        adminId=target_user.nickname or target_user.email,
-        role=_admin_role_code(role_row),
-        scope=_admin_scope_for_role(_admin_role_code(role_row)),
-        lastUpdated=_format_datetime(role_row.updated_at),
-        updatedBy=admin.user.nickname or admin.user.email,
-    )
+    return _serialize_admin_role(role_row, target_user, admin.user)
 
 
 @router.get("/users", response_model=list[AdminUserRecordOut])
 async def get_admin_users(
-    _: AdminContext = Depends(require_admin_context),
+    _: AdminContext = Depends(require_admin_user_permission),
     db: AsyncSession = Depends(get_db),
     keyword: str = Query(default=""),
     status_filter: str = Query(default="", alias="status"),
@@ -557,7 +650,7 @@ async def get_admin_users(
 @router.get("/users/{user_id}", response_model=AdminUserDetailOut)
 async def get_admin_user_detail(
     user_id: str,
-    _: AdminContext = Depends(require_admin_context),
+    _: AdminContext = Depends(require_admin_user_permission),
     db: AsyncSession = Depends(get_db),
 ):
     user = await db.get(User, user_id)
@@ -596,11 +689,66 @@ async def get_admin_user_detail(
     )
 
 
+@router.get("/services", response_model=list[AdminServiceRecordOut])
+async def get_admin_services(
+    _: AdminContext = Depends(require_admin_party_permission),
+    db: AsyncSession = Depends(get_db),
+):
+    creator = aliased(User)
+    result = await db.execute(
+        select(Service, creator)
+        .outerjoin(creator, Service.created_by == creator.id)
+        .order_by(Service.updated_at.desc(), Service.created_at.desc())
+    )
+    rows = result.all()
+    return [_serialize_admin_service(service, created_by) for service, created_by in rows]
+
+
+@router.patch("/services/{service_id}", response_model=AdminServiceRecordOut)
+async def update_admin_service(
+    service_id: str,
+    payload: AdminServiceUpdateIn,
+    admin: AdminContext = Depends(require_admin_party_permission),
+    db: AsyncSession = Depends(get_db),
+):
+    service = await db.get(Service, service_id)
+    if not service:
+        raise HTTPException(status_code=404, detail="서비스를 찾을 수 없습니다.")
+
+    service.max_members = payload.maxMembers
+    service.monthly_price = payload.monthlyPrice
+    service.logo_image_key = payload.logoImageKey
+    service.is_active = payload.isActive
+    service.commission_rate = payload.commissionRate
+    service.leader_discount_rate = payload.leaderDiscountRate
+    service.referral_discount_rate = payload.referralDiscountRate
+
+    await _append_activity_log(
+        db,
+        actor_user_id=admin.user.id,
+        action_type="admin_service_updated",
+        description=f"{service.name} 서비스 운영 값을 수정",
+        path=f"/api/admin/services/{service_id}",
+    )
+    await _append_system_log(
+        db,
+        level="INFO",
+        service="admin",
+        message=f"서비스 설정 변경: {service.name}",
+        actor=admin.user.nickname,
+    )
+    await db.commit()
+    await db.refresh(service)
+
+    created_by = await db.get(User, service.created_by) if service.created_by else None
+    return _serialize_admin_service(service, created_by)
+
+
 @router.patch("/users/{user_id}/status", response_model=AdminUserRecordOut)
 async def update_admin_user_status(
     user_id: str,
     payload: AdminUserStatusUpdateIn,
-    admin: AdminContext = Depends(require_admin_context),
+    admin: AdminContext = Depends(require_admin_user_permission),
     db: AsyncSession = Depends(get_db),
 ):
     target_user = await db.get(User, user_id)
@@ -681,7 +829,7 @@ async def update_admin_user_status(
 
 @router.get("/parties", response_model=list[AdminPartyRecordOut])
 async def get_admin_parties(
-    _: AdminContext = Depends(require_admin_context),
+    _: AdminContext = Depends(require_admin_party_permission),
     db: AsyncSession = Depends(get_db),
     keyword: str = Query(default=""),
     status_filter: str = Query(default="", alias="status"),
@@ -745,7 +893,7 @@ async def get_admin_parties(
 async def force_end_admin_party(
     party_id: str,
     payload: AdminPartyActionIn,
-    admin: AdminContext = Depends(require_admin_context),
+    admin: AdminContext = Depends(require_admin_party_permission),
     db: AsyncSession = Depends(get_db),
 ):
     party = await db.get(Party, party_id)
@@ -807,7 +955,7 @@ async def force_end_admin_party(
 
 @router.get("/reports", response_model=list[ReportRecordOut])
 async def get_admin_reports(
-    _: AdminContext = Depends(require_admin_context),
+    _: AdminContext = Depends(require_admin_report_permission),
     db: AsyncSession = Depends(get_db),
 ):
     rows = (await db.execute(select(Report).order_by(Report.created_at.desc()))).scalars().all()
@@ -840,7 +988,7 @@ async def get_admin_reports(
 async def update_admin_report_status(
     report_id: str,
     payload: AdminStatusUpdateIn,
-    admin: AdminContext = Depends(require_admin_context),
+    admin: AdminContext = Depends(require_admin_report_permission),
     db: AsyncSession = Depends(get_db),
 ):
     report = await db.get(Report, report_id)
@@ -874,7 +1022,7 @@ async def update_admin_report_status(
 
 @router.get("/receipts", response_model=list[ReceiptRecordOut])
 async def get_admin_receipts(
-    _: AdminContext = Depends(require_admin_context),
+    _: AdminContext = Depends(require_admin_receipt_permission),
     db: AsyncSession = Depends(get_db),
 ):
     rows = (await db.execute(select(Receipt).order_by(Receipt.created_at.desc()))).scalars().all()
@@ -895,7 +1043,7 @@ async def get_admin_receipts(
 async def update_admin_receipt_status(
     receipt_id: str,
     payload: AdminStatusUpdateIn,
-    admin: AdminContext = Depends(require_admin_context),
+    admin: AdminContext = Depends(require_admin_receipt_permission),
     db: AsyncSession = Depends(get_db),
 ):
     receipt = await db.get(Receipt, receipt_id)
@@ -926,7 +1074,7 @@ async def update_admin_receipt_status(
 
 @router.get("/settlements", response_model=list[SettlementRecordOut])
 async def get_admin_settlements(
-    _: AdminContext = Depends(require_admin_context),
+    _: AdminContext = Depends(require_admin_settlement_permission),
     db: AsyncSession = Depends(get_db),
 ):
     rows = (await db.execute(select(Settlement).order_by(Settlement.created_at.desc()))).scalars().all()
@@ -949,7 +1097,7 @@ async def get_admin_settlements(
 async def update_admin_settlement_status(
     settlement_id: str,
     payload: AdminStatusUpdateIn,
-    admin: AdminContext = Depends(require_admin_context),
+    admin: AdminContext = Depends(require_admin_settlement_permission),
     db: AsyncSession = Depends(get_db),
 ):
     stl = await db.get(Settlement, settlement_id)
@@ -988,7 +1136,7 @@ async def update_admin_settlement_status(
 
 @router.get("/logs", response_model=list[SystemLogRecordOut])
 async def get_admin_logs(
-    _: AdminContext = Depends(require_admin_context),
+    _: AdminContext = Depends(require_admin_log_permission),
     db: AsyncSession = Depends(get_db),
 ):
     logs: list[SystemLogRecordOut] = []
