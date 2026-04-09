@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from jose import JWTError, jwt
+from sqlalchemy import text
 
 from core.config import settings
 from core.database import AsyncSessionLocal, Base, engine
@@ -21,6 +22,10 @@ logging.basicConfig(level=logging.DEBUG)
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("ALTER TABLE services ADD COLUMN IF NOT EXISTS selling_price INTEGER"))
+        await conn.execute(
+            text("UPDATE services SET selling_price = monthly_price WHERE selling_price IS NULL")
+        )
     yield
 
 app = FastAPI(
