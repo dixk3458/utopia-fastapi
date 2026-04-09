@@ -48,6 +48,12 @@ def _party_total_price(party: Party, service: Service | None) -> int | None:
     if party.monthly_per_person is not None and max_members:
         return party.monthly_per_person * max_members
     return _service_monthly_price(service)
+
+
+def _service_original_price(service: Service | None) -> int | None:
+    if service is None:
+        return None
+    return service.original_price if service.original_price is not None else service.monthly_price
 # 구독가격표시
 
 
@@ -77,6 +83,7 @@ def _build_party_out(party: Party, current_user_id: Optional[uuid.UUID] = None) 
         # 구독가격표시 code
         max_members=_party_max_members(party, svc),
         monthly_price=_party_total_price(party, svc),
+        original_price=_service_original_price(svc),
         logo_image_key=svc.logo_image_key if svc else None,
         logo_image_url=build_minio_asset_url(svc.logo_image_key) if svc else None,
         member_count=_party_member_count(party),

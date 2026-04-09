@@ -27,6 +27,16 @@ async def lifespan(app: FastAPI):
                 """
                 DO $$
                 BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'services'
+                          AND column_name = 'original_price'
+                    ) THEN
+                        EXECUTE 'ALTER TABLE services ADD COLUMN original_price INTEGER';
+                    END IF;
+
                     IF EXISTS (
                         SELECT 1
                         FROM information_schema.columns
@@ -37,6 +47,8 @@ async def lifespan(app: FastAPI):
                         EXECUTE 'UPDATE services SET monthly_price = COALESCE(selling_price, monthly_price)';
                         EXECUTE 'ALTER TABLE services DROP COLUMN selling_price';
                     END IF;
+
+                    EXECUTE 'UPDATE services SET original_price = COALESCE(original_price, monthly_price) WHERE original_price IS NULL';
                 END
                 $$;
                 """
