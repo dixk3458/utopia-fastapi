@@ -14,17 +14,63 @@ from sqlalchemy import text
 from core.config import settings
 from core.database import AsyncSessionLocal, Base, engine
 from models.admin import ActivityLog
-from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report
-
+from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties
+from routers.mypage import profile
 logging.basicConfig(level=logging.DEBUG)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text("ALTER TABLE services ADD COLUMN IF NOT EXISTS selling_price INTEGER"))
         await conn.execute(
-            text("UPDATE services SET selling_price = monthly_price WHERE selling_price IS NULL")
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'services'
+                          AND column_name = 'original_price'
+                    ) THEN
+                        EXECUTE 'ALTER TABLE services ADD COLUMN original_price INTEGER';
+                    END IF;
+
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'services'
+                          AND column_name = 'selling_price'
+                    ) THEN
+                        EXECUTE 'UPDATE services SET monthly_price = COALESCE(selling_price, monthly_price)';
+                        EXECUTE 'ALTER TABLE services DROP COLUMN selling_price';
+                    END IF;
+
+                    EXECUTE 'UPDATE services SET original_price = COALESCE(original_price, monthly_price) WHERE original_price IS NULL';
+
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'activity_logs'
+                          AND column_name = 'ip_address'
+                          AND udt_name <> 'inet'
+                    ) THEN
+                        EXECUTE '
+                            ALTER TABLE activity_logs
+                            ALTER COLUMN ip_address TYPE inet
+                            USING CASE
+                                WHEN ip_address IS NULL OR btrim(ip_address::text) = '''' THEN NULL
+                                ELSE ip_address::inet
+                            END
+                        ';
+                    END IF;
+                END
+                $$;
+                """
+            )
         )
     yield
 
