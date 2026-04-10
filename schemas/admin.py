@@ -92,6 +92,7 @@ class AdminServiceUpdateIn(BaseModel):
 
 class AdminUserRecordOut(BaseModel):
     id: str
+    name: str | None = None
     nickname: str
     status: str
     reportCount: int
@@ -122,6 +123,7 @@ class AdminUserStatusUpdateIn(BaseModel):
 
 class AdminPartyRecordOut(BaseModel):
     id: str
+    title: str
     service: str
     leaderId: str
     memberCount: int
