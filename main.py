@@ -14,7 +14,7 @@ from sqlalchemy import text
 from core.config import settings
 from core.database import AsyncSessionLocal, Base, engine
 from models.admin import ActivityLog
-from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties
+from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report
 from routers.mypage import profile
 logging.basicConfig(level=logging.DEBUG)
 
