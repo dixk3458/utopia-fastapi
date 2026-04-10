@@ -122,6 +122,9 @@ async def list_parties(
             selectinload(Party.service),
         )
     )
+    # 파티 종료 수정
+    q = q.where(func.lower(Party.status) != "ended")
+    # 파티 종료 수정
 
     if service_id:
         q = q.where(Party.service_id == service_id)
