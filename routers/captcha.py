@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, UploadFile, Request
 import httpx
 import uuid
 import random
@@ -15,11 +15,6 @@ from core.config import settings
 router = APIRouter()
 logger = logging.getLogger("handocr-api")
 
-
-# ─────────────────────────────────────────────
-# HandOCR 캡챠 설정
-# ─────────────────────────────────────────────
-
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 GPU_SERVER_URL = settings.GPU_SERVER_URL
 
@@ -32,10 +27,31 @@ ALL_POSES = [
 
 MAX_ATTEMPTS = 5
 
-
 DATABASE_URL = settings.DATABASE_URL
-
 _db_pool: Optional[asyncpg.Pool] = None
+
+
+# ─────────────────────────────────────────────
+# IP / Rate Limit / Block 정책
+# ─────────────────────────────────────────────
+
+CAPTCHA_SESSION_TTL = 300
+PASS_TOKEN_TTL = 180
+
+# start 요청 제한
+START_LIMIT_PER_MINUTE = 10
+START_LIMIT_PER_10_MINUTES = 30
+
+# verify 실패 누적 제한
+VERIFY_FAIL_LIMIT_10M = 10
+VERIFY_FAIL_LIMIT_1H = 30
+
+# 차단 시간
+BLOCK_TTL_SHORT = 10 * 60      # 10분
+BLOCK_TTL_LONG = 60 * 60       # 1시간
+
+# 활성 세션 1개 제한
+ACTIVE_SESSION_TTL = CAPTCHA_SESSION_TTL
 
 
 def normalize_asyncpg_dsn(database_url: str) -> str:
@@ -56,6 +72,7 @@ async def get_db_pool() -> asyncpg.Pool:
         )
     return _db_pool
 
+
 def build_ai_failure_message(gpu_result: dict, remaining_attempts: int) -> str:
     error_code = gpu_result.get("error_code", "UNKNOWN_ERROR")
     detail = gpu_result.get("detail", "")
@@ -74,6 +91,7 @@ def build_ai_failure_message(gpu_result: dict, remaining_attempts: int) -> str:
         "HAND_LANDMARKER_FAILED": "AI 검사에 실패했습니다. 손 인식 모델 처리 중 오류가 발생했어요.",
         "MODEL_PREDICTION_FAILED": "AI 검사에 실패했습니다. 손 포즈 판별 중 오류가 발생했어요.",
         "EMPTY_IMAGE": "AI 검사에 실패했습니다. 업로드된 이미지가 비어 있어요.",
+        "HAND_TOO_SMALL": "AI 검사에 실패했습니다. 손이 너무 작게 찍혔어요.",
     }
 
     lines = [title_map.get(error_code, f"AI 검사에 실패했습니다. {gpu_result.get('message', '')}")]
@@ -111,6 +129,191 @@ def safe_int(value: Any):
         return None
 
 
+# ─────────────────────────────────────────────
+# IP 관련 유틸
+# ─────────────────────────────────────────────
+
+def get_client_ip(request: Request) -> str:
+    """
+    운영에서 프록시(Nginx/ALB/Cloudflare) 뒤에 있다면
+    해당 프록시를 신뢰하는 구성일 때만 X-Forwarded-For를 사용하세요.
+    그렇지 않으면 spoof 가능성이 있습니다.
+    """
+    x_forwarded_for = request.headers.get("x-forwarded-for")
+    if x_forwarded_for:
+        return x_forwarded_for.split(",")[0].strip()
+
+    x_real_ip = request.headers.get("x-real-ip")
+    if x_real_ip:
+        return x_real_ip.strip()
+
+    if request.client and request.client.host:
+        return request.client.host
+
+    return "unknown"
+
+
+async def get_block_ttl(ip: str) -> int:
+    ttl = await redis_client.ttl(f"captcha:block:{ip}")
+    return ttl if ttl and ttl > 0 else 0
+
+
+async def is_ip_blocked(ip: str) -> tuple[bool, int]:
+    ttl = await get_block_ttl(ip)
+    return ttl > 0, ttl
+
+
+async def block_ip(ip: str, ttl_seconds: int, reason: str):
+    block_value = {
+        "reason": reason,
+        "blocked": True,
+    }
+    await redis_client.setex(
+        f"captcha:block:{ip}",
+        ttl_seconds,
+        json.dumps(block_value, ensure_ascii=False),
+    )
+
+
+async def register_start_rate_limit(ip: str) -> tuple[bool, Optional[int], dict]:
+    """
+    /start 요청 rate limit
+    """
+    key_1m = f"captcha:start:{ip}:1m"
+    key_10m = f"captcha:start:{ip}:10m"
+
+    count_1m = await redis_client.incr(key_1m)
+    if count_1m == 1:
+        await redis_client.expire(key_1m, 60)
+
+    count_10m = await redis_client.incr(key_10m)
+    if count_10m == 1:
+        await redis_client.expire(key_10m, 600)
+
+    if count_1m > START_LIMIT_PER_MINUTE:
+        await block_ip(ip, 5 * 60, "too_many_start_requests_1m")
+        return True, 5 * 60, {
+            "type": "START_RATE_LIMIT",
+            "count1m": count_1m,
+            "count10m": count_10m,
+        }
+
+    if count_10m > START_LIMIT_PER_10_MINUTES:
+        await block_ip(ip, BLOCK_TTL_SHORT, "too_many_start_requests_10m")
+        return True, BLOCK_TTL_SHORT, {
+            "type": "START_RATE_LIMIT",
+            "count1m": count_1m,
+            "count10m": count_10m,
+        }
+
+    return False, None, {
+        "count1m": count_1m,
+        "count10m": count_10m,
+    }
+
+
+async def register_verify_failure(ip: str) -> tuple[bool, Optional[int], dict]:
+    """
+    /verify 실패 누적
+    """
+    key_10m = f"captcha:verify_fail:{ip}:10m"
+    key_1h = f"captcha:verify_fail:{ip}:1h"
+
+    fail_10m = await redis_client.incr(key_10m)
+    if fail_10m == 1:
+        await redis_client.expire(key_10m, 600)
+
+    fail_1h = await redis_client.incr(key_1h)
+    if fail_1h == 1:
+        await redis_client.expire(key_1h, 3600)
+
+    if fail_10m >= VERIFY_FAIL_LIMIT_10M:
+        await block_ip(ip, BLOCK_TTL_SHORT, "too_many_verify_failures_10m")
+        return True, BLOCK_TTL_SHORT, {
+            "type": "IP_BLOCKED",
+            "fail10m": fail_10m,
+            "fail1h": fail_1h,
+            "reason": "too_many_verify_failures_10m",
+        }
+
+    if fail_1h >= VERIFY_FAIL_LIMIT_1H:
+        await block_ip(ip, BLOCK_TTL_LONG, "too_many_verify_failures_1h")
+        return True, BLOCK_TTL_LONG, {
+            "type": "IP_BLOCKED",
+            "fail10m": fail_10m,
+            "fail1h": fail_1h,
+            "reason": "too_many_verify_failures_1h",
+        }
+
+    return False, None, {
+        "fail10m": fail_10m,
+        "fail1h": fail_1h,
+    }
+
+
+async def relax_verify_failures_on_success(ip: str):
+    """
+    성공 시 완전 초기화 대신 단기 실패 카운트만 완화.
+    """
+    await redis_client.delete(f"captcha:verify_fail:{ip}:10m")
+
+
+def make_blocked_response(ttl: int, message: Optional[str] = None) -> dict:
+    return {
+        "success": False,
+        "message": message or f"반복된 요청 또는 실패로 인해 임시 차단되었습니다. {ttl}초 후 다시 시도해주세요.",
+        "failureReason": {
+            "type": "IP_BLOCKED",
+            "retryAfterSeconds": ttl,
+        }
+    }
+
+
+async def handle_verify_failure_common(
+    *,
+    ip: str,
+    session_id: str,
+    session_data: dict,
+    message: str,
+    failure_reason: dict,
+):
+    """
+    verify 실패 공통 처리:
+    - 세션 attempts 증가
+    - TTL 유지
+    - IP 실패 누적
+    """
+    session_data["attempts"] = session_data.get("attempts", 0) + 1
+    await redis_client.setex(
+        f"captcha:{session_id}",
+        CAPTCHA_SESSION_TTL,
+        json.dumps(session_data, ensure_ascii=False),
+    )
+
+    blocked, ttl, fail_meta = await register_verify_failure(ip)
+    if blocked:
+        return make_blocked_response(
+            ttl=ttl or BLOCK_TTL_SHORT,
+            message=f"반복된 실패로 인해 임시 차단되었습니다. {ttl}초 후 다시 시도해주세요.",
+        )
+
+    failure_reason = dict(failure_reason)
+    failure_reason["ipFailCount"] = {
+        "fail10m": fail_meta.get("fail10m"),
+        "fail1h": fail_meta.get("fail1h"),
+    }
+
+    return {
+        "success": False,
+        "message": message,
+        "failureReason": failure_reason,
+    }
+
+
+# ─────────────────────────────────────────────
+# 학습 샘플 저장
+# ─────────────────────────────────────────────
+
 async def save_hand_pose_sample(
     *,
     session_id: str,
@@ -121,10 +324,6 @@ async def save_hand_pose_sample(
     text_match: Optional[bool],
     gpu_result: Optional[dict],
 ):
-    """
-    손 포즈 재학습용 샘플 저장.
-    성공/실패 모두 저장하되, 나중에 재학습할 때는 verify_success=True 또는 pose_match=True 기준으로 추출하면 됨.
-    """
     pool = await get_db_pool()
 
     request_id = None
@@ -236,8 +435,38 @@ async def save_hand_pose_sample(
         )
 
 
+# ─────────────────────────────────────────────
+# Start CAPTCHA
+# ─────────────────────────────────────────────
+
 @router.post("/captcha/handocr/start")
-async def start_captcha():
+async def start_captcha(request: Request):
+    ip = get_client_ip(request)
+
+    blocked, ttl = await is_ip_blocked(ip)
+    if blocked:
+        return make_blocked_response(ttl, f"요청이 너무 많아 임시 차단되었습니다. {ttl}초 후 다시 시도해주세요.")
+
+    limited, limit_ttl, _ = await register_start_rate_limit(ip)
+    if limited:
+        return make_blocked_response(
+            limit_ttl or BLOCK_TTL_SHORT,
+            f"문제 생성 요청이 너무 많습니다. {limit_ttl}초 후 다시 시도해주세요.",
+        )
+
+    active_session_key = f"captcha:active_session:{ip}"
+    existing_session_id = await redis_client.get(active_session_key)
+    if existing_session_id:
+        existing_ttl = await redis_client.ttl(active_session_key)
+        return {
+            "success": False,
+            "message": "이미 진행 중인 인증 세션이 있습니다. 기존 문제를 먼저 완료하거나 만료를 기다려주세요.",
+            "failureReason": {
+                "type": "ACTIVE_SESSION_EXISTS",
+                "retryAfterSeconds": existing_ttl if existing_ttl and existing_ttl > 0 else CAPTCHA_SESSION_TTL,
+            }
+        }
+
     chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     random_text = "".join(random.choice(chars) for _ in range(5))
     random_pose = random.choice(ALL_POSES)
@@ -246,55 +475,98 @@ async def start_captcha():
     session_data = {
         "text": random_text,
         "pose": random_pose,
-        "attempts": 0
+        "attempts": 0,
+        "ip": ip,
     }
 
-    await redis_client.setex(f"captcha:{session_id}", 300, json.dumps(session_data))
+    await redis_client.setex(
+        f"captcha:{session_id}",
+        CAPTCHA_SESSION_TTL,
+        json.dumps(session_data, ensure_ascii=False),
+    )
+    await redis_client.setex(active_session_key, ACTIVE_SESSION_TTL, session_id)
 
     return {
+        "success": True,
         "sessionId": session_id,
         "text": random_text,
         "pose": random_pose
     }
 
 
+# ─────────────────────────────────────────────
+# Verify CAPTCHA
+# ─────────────────────────────────────────────
+
 @router.post("/captcha/handocr/verify")
-async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(...)):
+async def verify_captcha(
+    request: Request,
+    sessionId: str = Form(...),
+    image: UploadFile = File(...),
+):
+    ip = get_client_ip(request)
+
+    blocked, ttl = await is_ip_blocked(ip)
+    if blocked:
+        return make_blocked_response(ttl)
+
     session_str = await redis_client.get(f"captcha:{sessionId}")
     if not session_str:
         return {
             "success": False,
-            "message": "유효하지 않거나 5분이 지나 만료된 세션입니다. 새로고침 후 다시 시작해주세요."
+            "message": "유효하지 않거나 5분이 지나 만료된 세션입니다. 새로고침 후 다시 시작해주세요.",
+            "failureReason": {
+                "type": "SESSION_EXPIRED",
+            }
         }
 
     session_data = json.loads(session_str)
     expected_pose = session_data["pose"]
     expected_text = session_data["text"]
+    session_ip = session_data.get("ip")
+
+    # 세션을 발급받은 IP와 verify 요청 IP가 다르면 차단
+    if session_ip and session_ip != ip:
+        return await handle_verify_failure_common(
+            ip=ip,
+            session_id=sessionId,
+            session_data=session_data,
+            message="세션을 발급받은 환경과 현재 요청 환경이 다릅니다. 다시 시작해주세요.",
+            failure_reason={
+                "type": "SESSION_IP_MISMATCH",
+                "expectedSessionIp": session_ip,
+            }
+        )
 
     if session_data.get("attempts", 0) >= MAX_ATTEMPTS:
         await redis_client.delete(f"captcha:{sessionId}")
+        if session_ip:
+            await redis_client.delete(f"captcha:active_session:{session_ip}")
         return {
             "success": False,
-            "message": "실패 횟수(5회)를 초과했습니다. 새로고침하여 처음부터 다시 시도해주세요."
+            "message": "실패 횟수(5회)를 초과했습니다. 새로고침하여 처음부터 다시 시도해주세요.",
+            "failureReason": {
+                "type": "MAX_SESSION_ATTEMPTS_EXCEEDED",
+            }
         }
 
     image_bytes = await image.read()
     if not image_bytes:
-        session_data["attempts"] += 1
-        await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
-        return {
-            "success": False,
-            "message": (
+        return await handle_verify_failure_common(
+            ip=ip,
+            session_id=sessionId,
+            session_data=session_data,
+            message=(
                 "업로드된 이미지가 비어 있습니다.\n"
                 "사진을 다시 찍거나 다른 파일을 업로드해주세요.\n"
-                f"남은 기회: {MAX_ATTEMPTS - session_data['attempts']}회"
+                f"남은 기회: {MAX_ATTEMPTS - (session_data.get('attempts', 0) + 1)}회"
             ),
-            "failureReason": {
+            failure_reason={
                 "type": "EMPTY_IMAGE",
                 "expectedPose": expected_pose,
                 "expectedText": expected_text,
             }
-        }
+        )
 
     gpu_result = None
     gpu_status_code = None
@@ -329,33 +601,36 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
                 gpu_result = response.json()
             except Exception as json_error:
                 logger.exception("GPU json parse failed")
-                session_data["attempts"] += 1
-                await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
 
-                await save_hand_pose_sample(
+                try:
+                    await save_hand_pose_sample(
+                        session_id=sessionId,
+                        expected_pose=expected_pose,
+                        expected_text=expected_text,
+                        verify_success=False,
+                        pose_match=None,
+                        text_match=None,
+                        gpu_result={
+                            "success": False,
+                            "error_code": "GPU_JSON_PARSE_FAILED",
+                            "message": "AI 서버 응답을 해석하지 못했습니다.",
+                            "detail": repr(json_error),
+                        },
+                    )
+                except Exception:
+                    logger.exception("failed to save failed hand pose sample")
+
+                return await handle_verify_failure_common(
+                    ip=ip,
                     session_id=sessionId,
-                    expected_pose=expected_pose,
-                    expected_text=expected_text,
-                    verify_success=False,
-                    pose_match=None,
-                    text_match=None,
-                    gpu_result={
-                        "success": False,
-                        "error_code": "GPU_JSON_PARSE_FAILED",
-                        "message": "AI 서버 응답을 해석하지 못했습니다.",
-                        "detail": repr(json_error),
-                    },
-                )
-
-                return {
-                    "success": False,
-                    "message": (
+                    session_data=session_data,
+                    message=(
                         "AI 서버 응답을 해석하지 못했습니다.\n"
                         "AI 서버가 JSON이 아닌 응답을 반환했습니다.\n"
                         f"상세: {repr(json_error)}\n"
-                        f"남은 기회: {MAX_ATTEMPTS - session_data['attempts']}회"
+                        f"남은 기회: {MAX_ATTEMPTS - (session_data.get('attempts', 0) + 1)}회"
                     ),
-                    "failureReason": {
+                    failure_reason={
                         "type": "GPU_JSON_PARSE_FAILED",
                         "expectedPose": expected_pose,
                         "expectedText": expected_text,
@@ -364,74 +639,72 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
                         "detail": repr(json_error),
                         "gpuServerUrl": GPU_SERVER_URL,
                     }
-                }
+                )
 
             logger.info("GPU json=%s", gpu_result)
 
         except httpx.ConnectTimeout as e:
             logger.exception("GPU connect timeout")
-            session_data["attempts"] += 1
-            await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
-            return {
-                "success": False,
-                "message": (
+            return await handle_verify_failure_common(
+                ip=ip,
+                session_id=sessionId,
+                session_data=session_data,
+                message=(
                     "AI 서버 연결 시간이 초과되었습니다.\n"
                     "GPU 서버가 응답 가능한 상태인지 확인해주세요.\n"
-                    f"남은 기회: {MAX_ATTEMPTS - session_data['attempts']}회"
+                    f"남은 기회: {MAX_ATTEMPTS - (session_data.get('attempts', 0) + 1)}회"
                 ),
-                "failureReason": {
+                failure_reason={
                     "type": "GPU_CONNECT_TIMEOUT",
                     "expectedPose": expected_pose,
                     "expectedText": expected_text,
                     "detail": repr(e),
                     "gpuServerUrl": GPU_SERVER_URL,
                 }
-            }
+            )
 
         except httpx.ConnectError as e:
             logger.exception("GPU connect error")
-            session_data["attempts"] += 1
-            await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
-            return {
-                "success": False,
-                "message": (
+            return await handle_verify_failure_common(
+                ip=ip,
+                session_id=sessionId,
+                session_data=session_data,
+                message=(
                     "AI 서버 연결에 실패했습니다.\n"
                     "GPU 서버가 꺼져 있거나, 주소/포트가 잘못되었거나, 네트워크에 문제가 있을 수 있습니다.\n"
-                    f"남은 기회: {MAX_ATTEMPTS - session_data['attempts']}회"
+                    f"남은 기회: {MAX_ATTEMPTS - (session_data.get('attempts', 0) + 1)}회"
                 ),
-                "failureReason": {
+                failure_reason={
                     "type": "GPU_CONNECT_ERROR",
                     "expectedPose": expected_pose,
                     "expectedText": expected_text,
                     "detail": repr(e),
                     "gpuServerUrl": GPU_SERVER_URL,
                 }
-            }
+            )
 
         except httpx.ReadTimeout as e:
             logger.exception("GPU read timeout")
-            session_data["attempts"] += 1
-            await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
-            return {
-                "success": False,
-                "message": (
+            return await handle_verify_failure_common(
+                ip=ip,
+                session_id=sessionId,
+                session_data=session_data,
+                message=(
                     "AI 서버가 사진을 분석하는 데 시간이 너무 오래 걸리고 있습니다.\n"
                     "서버는 살아 있지만 응답이 지연되고 있을 수 있습니다.\n"
-                    f"남은 기회: {MAX_ATTEMPTS - session_data['attempts']}회"
+                    f"남은 기회: {MAX_ATTEMPTS - (session_data.get('attempts', 0) + 1)}회"
                 ),
-                "failureReason": {
+                failure_reason={
                     "type": "GPU_READ_TIMEOUT",
                     "expectedPose": expected_pose,
                     "expectedText": expected_text,
                     "detail": repr(e),
                     "gpuServerUrl": GPU_SERVER_URL,
                 }
-            }
+            )
 
         except httpx.HTTPStatusError as e:
             logger.exception("GPU HTTP status error")
-            session_data["attempts"] += 1
-            await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
 
             response_text = ""
             try:
@@ -451,14 +724,16 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
             elif status_code == 500:
                 message = "AI 서버 내부 오류가 발생했습니다."
 
-            return {
-                "success": False,
-                "message": (
+            return await handle_verify_failure_common(
+                ip=ip,
+                session_id=sessionId,
+                session_data=session_data,
+                message=(
                     f"{message}\n"
                     f"HTTP 상태 코드: {status_code}\n"
-                    f"남은 기회: {MAX_ATTEMPTS - session_data['attempts']}회"
+                    f"남은 기회: {MAX_ATTEMPTS - (session_data.get('attempts', 0) + 1)}회"
                 ),
-                "failureReason": {
+                failure_reason={
                     "type": "GPU_HTTP_ERROR",
                     "expectedPose": expected_pose,
                     "expectedText": expected_text,
@@ -466,73 +741,68 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
                     "responseText": response_text,
                     "gpuServerUrl": GPU_SERVER_URL,
                 }
-            }
+            )
 
         except httpx.RequestError as e:
             logger.exception("GPU request error")
-            session_data["attempts"] += 1
-            await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
-            return {
-                "success": False,
-                "message": (
+            return await handle_verify_failure_common(
+                ip=ip,
+                session_id=sessionId,
+                session_data=session_data,
+                message=(
                     "AI 서버 요청 처리 중 네트워크 오류가 발생했습니다.\n"
                     f"상세: {repr(e)}\n"
-                    f"남은 기회: {MAX_ATTEMPTS - session_data['attempts']}회"
+                    f"남은 기회: {MAX_ATTEMPTS - (session_data.get('attempts', 0) + 1)}회"
                 ),
-                "failureReason": {
+                failure_reason={
                     "type": "GPU_REQUEST_ERROR",
                     "expectedPose": expected_pose,
                     "expectedText": expected_text,
                     "detail": repr(e),
                     "gpuServerUrl": GPU_SERVER_URL,
                 }
-            }
+            )
 
         except Exception as e:
             logger.exception("GPU request/parse failed")
             traceback.print_exc()
-            session_data["attempts"] += 1
-            await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
-            return {
-                "success": False,
-                "message": (
+            return await handle_verify_failure_common(
+                ip=ip,
+                session_id=sessionId,
+                session_data=session_data,
+                message=(
                     "AI 서버 통신 처리 중 알 수 없는 오류가 발생했습니다.\n"
                     f"상세: {repr(e)}\n"
-                    f"남은 기회: {MAX_ATTEMPTS - session_data['attempts']}회"
+                    f"남은 기회: {MAX_ATTEMPTS - (session_data.get('attempts', 0) + 1)}회"
                 ),
-                "failureReason": {
+                failure_reason={
                     "type": "GPU_UNKNOWN_ERROR",
                     "expectedPose": expected_pose,
                     "expectedText": expected_text,
                     "detail": repr(e),
                     "gpuServerUrl": GPU_SERVER_URL,
                 }
-            }
+            )
 
     if not isinstance(gpu_result, dict):
-        session_data["attempts"] += 1
-        await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
-        return {
-            "success": False,
-            "message": (
+        return await handle_verify_failure_common(
+            ip=ip,
+            session_id=sessionId,
+            session_data=session_data,
+            message=(
                 "AI 서버 응답 형식이 올바르지 않습니다.\n"
-                f"남은 기회: {MAX_ATTEMPTS - session_data['attempts']}회"
+                f"남은 기회: {MAX_ATTEMPTS - (session_data.get('attempts', 0) + 1)}회"
             ),
-            "failureReason": {
+            failure_reason={
                 "type": "GPU_INVALID_RESPONSE",
                 "expectedPose": expected_pose,
                 "expectedText": expected_text,
                 "gpuResultType": str(type(gpu_result)),
                 "gpuServerUrl": GPU_SERVER_URL,
             }
-        }
+        )
 
     if not gpu_result.get("success"):
-        session_data["attempts"] += 1
-        await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
-        remaining_attempts = MAX_ATTEMPTS - session_data["attempts"]
-
-        # 실패 샘플도 저장
         try:
             await save_hand_pose_sample(
                 session_id=sessionId,
@@ -546,10 +816,15 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
         except Exception:
             logger.exception("failed to save failed hand pose sample")
 
-        return {
-            "success": False,
-            "message": build_ai_failure_message(gpu_result, remaining_attempts),
-            "failureReason": {
+        return await handle_verify_failure_common(
+            ip=ip,
+            session_id=sessionId,
+            session_data=session_data,
+            message=build_ai_failure_message(
+                gpu_result,
+                MAX_ATTEMPTS - (session_data.get("attempts", 0) + 1),
+            ),
+            failure_reason={
                 "type": "AI_DETECTION_FAILED",
                 "expectedPose": expected_pose,
                 "expectedText": expected_text,
@@ -561,7 +836,7 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
                 "inspection": gpu_result.get("inspection"),
                 "gpuServerUrl": GPU_SERVER_URL,
             }
-        }
+        )
 
     detected_pose = gpu_result.get("detected_pose")
     pose_confidence = safe_float(gpu_result.get("pose_confidence"))
@@ -572,7 +847,6 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
     pose_ok = detected_pose == expected_pose
     text_ok = detected_text == expected_text
 
-    # 성공/실패와 상관없이, 여기까지 온 정상 응답 샘플은 저장
     try:
         await save_hand_pose_sample(
             session_id=sessionId,
@@ -587,9 +861,6 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
         logger.exception("failed to save hand pose sample")
 
     if not pose_ok or not text_ok:
-        session_data["attempts"] += 1
-        await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
-
         reasons = []
 
         if not pose_ok:
@@ -613,12 +884,14 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
             message += f"\nOCR 신뢰도: {ocr_confidence:.2f}"
 
         message += "\n손 포즈와 5자리 문자+숫자가 모두 선명하게 보이도록 다시 촬영해주세요."
-        message += f"\n남은 기회: {MAX_ATTEMPTS - session_data['attempts']}회"
+        message += f"\n남은 기회: {MAX_ATTEMPTS - (session_data.get('attempts', 0) + 1)}회"
 
-        return {
-            "success": False,
-            "message": message,
-            "failureReason": {
+        return await handle_verify_failure_common(
+            ip=ip,
+            session_id=sessionId,
+            session_data=session_data,
+            message=message,
+            failure_reason={
                 "type": "MISSION_MISMATCH",
                 "expectedPose": expected_pose,
                 "detectedPose": detected_pose,
@@ -630,11 +903,15 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
                 "inspection": gpu_result.get("inspection"),
                 "gpuServerUrl": GPU_SERVER_URL,
             }
-        }
+        )
 
     pass_token = str(uuid.uuid4())
-    await redis_client.setex(f"captcha_pass:{pass_token}", 180, "PASSED")
+    await redis_client.setex(f"captcha_pass:{pass_token}", PASS_TOKEN_TTL, "PASSED")
+
     await redis_client.delete(f"captcha:{sessionId}")
+    await redis_client.delete(f"captcha:active_session:{ip}")
+
+    await relax_verify_failures_on_success(ip)
 
     return {
         "success": True,
