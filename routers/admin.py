@@ -851,7 +851,6 @@ async def update_admin_user_status(
             type="SYSTEM",
             title="계정 상태 변경",
             message=f"관리자에 의해 계정 상태가 '{payload.status}'로 변경되었습니다.",
-            created_by=admin.user.id,
         )
     )
     await _append_activity_log(
@@ -981,7 +980,6 @@ async def force_end_admin_party(
                 message=f"관리자에 의해 파티가 종료되었습니다. 사유: {payload.reason or '운영 정책 위반'}",
                 reference_type="party",
                 reference_id=party.id,
-                created_by=admin.user.id,
             )
         )
 
