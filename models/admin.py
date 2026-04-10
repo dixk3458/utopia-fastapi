@@ -71,6 +71,7 @@ class Report(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     target_snapshot_name: Mapped[str | None] = mapped_column(String(255))
+    evidence_key: Mapped[str | None] = mapped_column(String(500))
 
 
 class Receipt(Base):
