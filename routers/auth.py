@@ -73,6 +73,7 @@ class SocialSignupBody(BaseModel):
     oauth_id: str
     email: Optional[str] = None
     nickname: str
+    phone: Optional[str] = None 
 
 
 def get_email_auth_key(email: str) -> str:
@@ -263,6 +264,7 @@ async def social_signup(data: SocialSignupBody, response: Response, db: AsyncSes
     oauth_id = data.oauth_id
     email = data.email
     nickname = data.nickname.strip()
+    phone =data.phone
 
     result = await db.execute(select(User).where(User.provider == oauth, User.provider_id == oauth_id))
     existing = result.scalar_one_or_none()
@@ -291,6 +293,7 @@ async def social_signup(data: SocialSignupBody, response: Response, db: AsyncSes
         provider=oauth,
         provider_id=oauth_id,
         password_hash=None,
+        phone=phone,
     )
     db.add(user)
     await db.commit()

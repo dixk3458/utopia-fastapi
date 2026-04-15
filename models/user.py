@@ -43,3 +43,9 @@ class User(Base):
         foreign_keys="Notification.user_id",  # ← 핵심 수정
         back_populates="user"
     )  # noqa
+
+    quick_match_requests: Mapped[list["QuickMatchRequest"]] = relationship(
+        "QuickMatchRequest",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )

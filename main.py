@@ -16,6 +16,7 @@ from core.database import AsyncSessionLocal, Base, engine
 from models.admin import ActivityLog
 from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report, ws_notifications
 from routers.mypage import profile
+from routers.quick_match import router as quick_match_router
 logging.basicConfig(level=logging.DEBUG)
 
 @asynccontextmanager
@@ -172,6 +173,7 @@ async def admin_access_log_middleware(request: Request, call_next):
 # 라우터 등록 (prefix="/api" 유지)
 app.include_router(auth.router, prefix="/api")
 app.include_router(parties.router, prefix="/api")
+app.include_router(quick_match_router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(ws_notifications.router)
 app.include_router(chat.router, prefix="/api")

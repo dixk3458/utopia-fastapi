@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     OLLAMA_MODEL: str = "exaone3.5:7.8b"
     # GPU
     GPU_SERVER_URL: str
+    GPU_EMBEDDING_URL: str
     # Email
     MAIL_USERNAME: str = ""
     MAIL_PASSWORD: str = ""
