@@ -43,6 +43,7 @@ class PartyOut(BaseModel):
     max_members: Optional[int] = None
     monthly_price: Optional[int] = None
     original_price: Optional[int] = None
+    service_total_price: Optional[int] = None  # 서비스 전체 구독 금액 (환급 계산용)
     logo_image_key: Optional[str] = None
     logo_image_url: Optional[str] = None
     member_count: int = 0
