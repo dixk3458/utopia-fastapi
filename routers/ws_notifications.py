@@ -13,34 +13,40 @@ from services.notification_ws_service import notification_connection_manager
 router = APIRouter(tags=["notifications-ws"])
 
 
-async def get_user_id_from_websocket(websocket: WebSocket) -> uuid.UUID:
+async def get_user_id_from_websocket(websocket: WebSocket) -> uuid.UUID | None:
+    """
+    WebSocket 인증: accept() 이후에 호출해야 합니다.
+    인증 실패 시 None 반환 (close는 호출자에서 처리).
+    """
     access_token = websocket.cookies.get("access_token")
 
     if not access_token:
-        await websocket.close(code=4401)
-        raise WebSocketDisconnect
+        return None
 
     try:
         payload = decode_access_token(access_token)
         user_id_str = payload.get("sub")
 
         if not user_id_str:
-            await websocket.close(code=4401)
-            raise WebSocketDisconnect
+            return None
 
         return uuid.UUID(user_id_str)
 
-    except (JWTError, ValueError, TypeError):
-        await websocket.close(code=4401)
-        raise WebSocketDisconnect
     except Exception:
-        await websocket.close(code=4401)
-        raise WebSocketDisconnect
+        return None
 
 
 @router.websocket("/ws/notifications")
 async def notifications_websocket(websocket: WebSocket):
+    # ✅ 핵심: accept()를 반드시 먼저 호출해야 close()가 정상 동작합니다
+    await websocket.accept()
+
     user_id = await get_user_id_from_websocket(websocket)
+
+    if user_id is None:
+        await websocket.close(code=4401)
+        return
+
     await notification_connection_manager.connect(user_id, websocket)
 
     try:
@@ -71,7 +77,6 @@ async def notifications_websocket(websocket: WebSocket):
                     await websocket.send_json({"type": "pong"})
 
             except asyncio.TimeoutError:
-                # 일정 시간 동안 클라이언트 메시지가 없어도 연결 유지용 응답 전송
                 await websocket.send_json({"type": "pong"})
 
     except WebSocketDisconnect:
