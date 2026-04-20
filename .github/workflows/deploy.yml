@@ -68,6 +68,7 @@ jobs:
             fi
 
             source venv/bin/activate
+            pip install torch --index-url https://download.pytorch.org/whl/cpu 2>/dev/null || true
             pip install -r requirements.txt
 
             pkill -f "uvicorn main:app" || true
