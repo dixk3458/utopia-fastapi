@@ -14,10 +14,6 @@ router = APIRouter(tags=["notifications-ws"])
 
 
 async def get_user_id_from_websocket(websocket: WebSocket) -> uuid.UUID | None:
-    """
-    WebSocket 인증: accept() 이후에 호출해야 합니다.
-    인증 실패 시 None 반환 (close는 호출자에서 처리).
-    """
     access_token = websocket.cookies.get("access_token")
 
     if not access_token:
@@ -38,15 +34,13 @@ async def get_user_id_from_websocket(websocket: WebSocket) -> uuid.UUID | None:
 
 @router.websocket("/ws/notifications")
 async def notifications_websocket(websocket: WebSocket):
-    # ✅ 핵심: accept()를 반드시 먼저 호출해야 close()가 정상 동작합니다
-    await websocket.accept()
-
     user_id = await get_user_id_from_websocket(websocket)
 
     if user_id is None:
         await websocket.close(code=4401)
         return
 
+    # accept()는 notification_connection_manager.connect() 내부에서 호출됨
     await notification_connection_manager.connect(user_id, websocket)
 
     try:
