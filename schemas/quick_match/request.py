@@ -10,8 +10,8 @@ class QuickMatchCreateRequest(BaseModel):
             "example": {
                 "service_id": "11111111-1111-1111-1111-111111111111",
                 "preferred_conditions": {
-                    "estimated_price": "4000-5000",
-                    "preferred_time": "evening",
+                    "price_range": "4000-5000",
+                    "duration_preference": "long_term",
                 },
             }
         }
@@ -23,12 +23,37 @@ class QuickMatchCreateRequest(BaseModel):
         description="빠른매칭 선호 조건 JSON",
     )
 
+    @field_validator("preferred_conditions")
+    @classmethod
+    def normalize_preferred_conditions(
+        cls,
+        value: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+
+        normalized = dict(value)
+
+        # 구버전 호환: estimated_price -> price_range
+        if "estimated_price" in normalized and "price_range" not in normalized:
+            normalized["price_range"] = normalized.pop("estimated_price")
+
+        duration_preference = normalized.get("duration_preference")
+        if isinstance(duration_preference, str):
+            normalized["duration_preference"] = duration_preference.strip().lower()
+
+        price_range = normalized.get("price_range")
+        if isinstance(price_range, str):
+            normalized["price_range"] = price_range.strip()
+
+        return normalized
+
 
 class QuickMatchCancelRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "reason": "user_cancelled"
+                "reason": "user_cancelled",
             }
         }
     )
@@ -41,18 +66,18 @@ class QuickMatchCancelRequest(BaseModel):
 
     @field_validator("reason")
     @classmethod
-    def validate_reason(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        v = v.strip()
-        return v or "user_cancelled"
+    def validate_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        return value or "user_cancelled"
 
 
 class QuickMatchRetryRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "reason": "no_candidate_selected"
+                "reason": "no_candidate_selected",
             }
         }
     )
@@ -65,8 +90,8 @@ class QuickMatchRetryRequest(BaseModel):
 
     @field_validator("reason")
     @classmethod
-    def validate_reason(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        v = v.strip()
-        return v or "manual_retry"
+    def validate_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        return value or "manual_retry"

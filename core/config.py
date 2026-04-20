@@ -50,7 +50,8 @@ class Settings(BaseSettings):
     CAPTCHA_TOKEN_TTL_SECONDS: int = 300
     CAPTCHA_TOKEN_MAX_USES: int = 3
     CAPTCHA_MAX_ATTEMPTS: int = 5
-    CAPTCHA_LOCK_SECONDS: int = 1800
+    CAPTCHA_LOCK_SECONDS_1: int = 300    # 1회차 잠금: 5분
+    CAPTCHA_LOCK_SECONDS_2: int = 600    # 2회차 잠금: 10분
     CAPTCHA_BAN_SECONDS: int = 86400
     CAPTCHA_WAIT_SECONDS: int = 30
     CAPTCHA_RATE_LIMIT_WINDOW_SECONDS: int = 60
@@ -79,6 +80,9 @@ class Settings(BaseSettings):
     NAVER_CLIENT_ID: str = ""
     NAVER_CLIENT_SECRET: str = ""
     NAVER_REDIRECT_URI: str = ""
+
+    # 포트원
+    PORTONE_API_SECRET: str = ""
 
     class Config:
         env_file = ".env"

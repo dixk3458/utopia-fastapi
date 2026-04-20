@@ -14,10 +14,14 @@ from sqlalchemy import text
 from core.config import settings
 from core.database import AsyncSessionLocal, Base, engine
 from models.admin import ActivityLog
+<<<<<<< HEAD
 from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report, ws_notifications
 from routers.mypage import profile
 from routers.quick_match import router as quick_match_router
 
+=======
+from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report, ws_notifications, payments
+>>>>>>> e374a257354c5c95792fc9fa8ad4fa2bf19bd9f6
 from routers.mypage import parties as mypage_parties, profile
 
 logging.basicConfig(level=logging.DEBUG)
@@ -190,6 +194,8 @@ app.include_router(report.router, prefix="/api")
 
 app.include_router(profile.router, prefix="/api")
 app.include_router(mypage_parties.router, prefix="/api")
+
+app.include_router(payments.router, prefix="/api")
 
 @app.get("/api/health")
 async def health():

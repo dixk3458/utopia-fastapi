@@ -65,6 +65,13 @@ class QuickMatchCandidate(Base):
         server_default="0",
     )
 
+    llm_score: Mapped[float] = mapped_column(
+        Numeric(5, 2),
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
     ai_score: Mapped[float] = mapped_column(
         Numeric(5, 2),
         nullable=False,

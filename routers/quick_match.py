@@ -6,23 +6,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
 from core.security import require_user
+from models.quick_match.request import QuickMatchRequest, QuickMatchRequestStatus
 from models.user import User
-
 from schemas.quick_match.request import (
-    QuickMatchCreateRequest,
     QuickMatchCancelRequest,
+    QuickMatchCreateRequest,
     QuickMatchRetryRequest,
 )
 from schemas.quick_match.response import (
+    QuickMatchCandidateResponse,
     QuickMatchCreateResponse,
     QuickMatchDetailResponse,
     QuickMatchRequestResponse,
     QuickMatchResultResponse,
-    QuickMatchCandidateResponse,
 )
-
 from services.quick_match.quick_match_service import QuickMatchService
-from models.quick_match.request import QuickMatchRequest, QuickMatchRequestStatus
 
 
 router = APIRouter(
@@ -32,15 +30,32 @@ router = APIRouter(
 
 quick_match_service = QuickMatchService()
 
-error_map = {
-    "USER_NOT_FOUND": (404, "사용자를 찾을 수 없습니다."),
-    "USER_INACTIVE": (403, "비활성 사용자입니다."),
-    "USER_BANNED": (403, "정지된 사용자입니다."),
-    "ALREADY_REQUESTED": (409, "이미 진행 중인 빠른매칭 요청이 있습니다."),
-    "GPU_EMBEDDING_CONNECT_TIMEOUT": (504, "임베딩 서버 연결 시간이 초과되었습니다."),
-    "GPU_EMBEDDING_CONNECT_ERROR": (502, "임베딩 서버에 연결할 수 없습니다."),
-    "GPU_EMBEDDING_HTTP_ERROR": (502, "임베딩 서버가 오류 응답을 반환했습니다."),
-}
+
+def map_error(error_code: str) -> tuple[int, str]:
+    error_map = {
+        "USER_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "사용자를 찾을 수 없습니다."),
+        "USER_INACTIVE": (status.HTTP_403_FORBIDDEN, "비활성 사용자입니다."),
+        "USER_BANNED": (status.HTTP_403_FORBIDDEN, "정지된 사용자입니다."),
+        "ALREADY_REQUESTED": (status.HTTP_409_CONFLICT, "이미 진행 중인 빠른매칭 요청이 있습니다."),
+        "ALREADY_IN_ACTIVE_PARTY": (status.HTTP_409_CONFLICT, "이미 참여 중인 활성 파티가 있습니다."),
+        "REQUEST_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "빠른매칭 요청을 찾을 수 없습니다."),
+        "INVALID_REQUEST_STATUS": (status.HTTP_400_BAD_REQUEST, "요청 상태가 올바르지 않습니다."),
+        "NO_RECRUITING_PARTY": (status.HTTP_404_NOT_FOUND, "모집 중인 파티가 없습니다."),
+        "EMBEDDING_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "사용자 임베딩이 존재하지 않습니다."),
+        "NO_CANDIDATE": (status.HTTP_404_NOT_FOUND, "선택 가능한 후보가 없습니다."),
+        "REQUEST_NOT_MATCHED": (status.HTTP_400_BAD_REQUEST, "아직 매칭 완료 상태가 아닙니다."),
+        "MATCHED_PARTY_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "매칭된 파티가 없습니다."),
+        "PARTY_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "파티를 찾을 수 없습니다."),
+        "PARTY_STATUS_CHANGED": (status.HTTP_409_CONFLICT, "파티 상태가 변경되었습니다."),
+        "PARTY_FULL": (status.HTTP_409_CONFLICT, "파티 정원이 마감되었습니다."),
+        "ALREADY_JOINED": (status.HTTP_409_CONFLICT, "이미 참여 중인 파티입니다."),
+        "GPU_EMBEDDING_CONNECT_TIMEOUT": (status.HTTP_504_GATEWAY_TIMEOUT, "임베딩 서버 연결 시간이 초과되었습니다."),
+        "GPU_EMBEDDING_CONNECT_ERROR": (status.HTTP_502_BAD_GATEWAY, "임베딩 서버에 연결할 수 없습니다."),
+        "GPU_EMBEDDING_HTTP_ERROR": (status.HTTP_502_BAD_GATEWAY, "임베딩 서버가 오류 응답을 반환했습니다."),
+    }
+    return error_map.get(error_code, (status.HTTP_400_BAD_REQUEST, error_code))
+
+
 @router.post(
     "",
     response_model=QuickMatchCreateResponse,
@@ -64,15 +79,8 @@ async def create_quick_match_request(
             request_id=request.id,
             status=request.status.value if hasattr(request.status, "value") else str(request.status),
         )
-
-    except Exception as e:
-        error_map = {
-            "USER_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "사용자를 찾을 수 없습니다."),
-            "USER_INACTIVE": (status.HTTP_403_FORBIDDEN, "비활성 사용자입니다."),
-            "USER_BANNED": (status.HTTP_403_FORBIDDEN, "정지된 사용자입니다."),
-            "ALREADY_REQUESTED": (status.HTTP_409_CONFLICT, "이미 진행 중인 빠른매칭 요청이 있습니다."),
-        }
-        code, message = error_map.get(str(e), (status.HTTP_400_BAD_REQUEST, str(e)))
+    except Exception as error:
+        code, message = map_error(str(error))
         raise HTTPException(status_code=code, detail=message)
 
 
@@ -91,13 +99,8 @@ async def generate_quick_match_candidates(
             db=db,
             request_id=request_id,
         )
-    except Exception as e:
-        error_map = {
-            "REQUEST_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "빠른매칭 요청을 찾을 수 없습니다."),
-            "INVALID_REQUEST_STATUS": (status.HTTP_400_BAD_REQUEST, "요청 상태가 올바르지 않습니다."),
-            "NO_RECRUITING_PARTY": (status.HTTP_404_NOT_FOUND, "모집 중인 파티가 없습니다."),
-        }
-        code, message = error_map.get(str(e), (status.HTTP_400_BAD_REQUEST, str(e)))
+    except Exception as error:
+        code, message = map_error(str(error))
         raise HTTPException(status_code=code, detail=message)
 
 
@@ -116,15 +119,8 @@ async def select_quick_match_party(
             db=db,
             request_id=request_id,
         )
-    except Exception as e:
-        error_map = {
-            "NO_CANDIDATE": (status.HTTP_404_NOT_FOUND, "선택 가능한 후보가 없습니다."),
-            "REQUEST_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "빠른매칭 요청을 찾을 수 없습니다."),
-            "PARTY_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "파티를 찾을 수 없습니다."),
-            "PARTY_STATUS_CHANGED": (status.HTTP_409_CONFLICT, "파티 상태가 변경되었습니다."),
-            "PARTY_FULL": (status.HTTP_409_CONFLICT, "파티 정원이 마감되었습니다."),
-        }
-        code, message = error_map.get(str(e), (status.HTTP_400_BAD_REQUEST, str(e)))
+    except Exception as error:
+        code, message = map_error(str(error))
         raise HTTPException(status_code=code, detail=message)
 
 
@@ -156,24 +152,15 @@ async def join_quick_match_party(
             db=db,
             request_id=request_id,
         )
-    except RuntimeError as e:
-        if str(e) == "LOCK_NOT_ACQUIRED":
+    except RuntimeError as error:
+        if str(error) == "LOCK_NOT_ACQUIRED":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="동시 처리 중입니다. 잠시 후 다시 시도해주세요.",
             )
         raise
-    except Exception as e:
-        error_map = {
-            "REQUEST_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "빠른매칭 요청을 찾을 수 없습니다."),
-            "REQUEST_NOT_MATCHED": (status.HTTP_400_BAD_REQUEST, "아직 매칭 완료 상태가 아닙니다."),
-            "MATCHED_PARTY_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "매칭된 파티가 없습니다."),
-            "PARTY_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "파티를 찾을 수 없습니다."),
-            "PARTY_STATUS_CHANGED": (status.HTTP_409_CONFLICT, "파티 상태가 변경되었습니다."),
-            "PARTY_FULL": (status.HTTP_409_CONFLICT, "파티 정원이 마감되었습니다."),
-            "ALREADY_JOINED": (status.HTTP_409_CONFLICT, "이미 참여 중인 파티입니다."),
-        }
-        code, message = error_map.get(str(e), (status.HTTP_400_BAD_REQUEST, str(e)))
+    except Exception as error:
+        code, message = map_error(str(error))
         raise HTTPException(status_code=code, detail=message)
 
 
@@ -255,11 +242,8 @@ async def retry_quick_match_request(
             request_id=request_id,
             reason=payload.reason or "manual_retry",
         )
-    except Exception as e:
-        error_map = {
-            "REQUEST_NOT_FOUND": (status.HTTP_404_NOT_FOUND, "빠른매칭 요청을 찾을 수 없습니다."),
-        }
-        code, message = error_map.get(str(e), (status.HTTP_400_BAD_REQUEST, str(e)))
+    except Exception as error:
+        code, message = map_error(str(error))
         raise HTTPException(status_code=code, detail=message)
 
 

@@ -34,6 +34,7 @@ class QuickMatchCandidateResponse(BaseModel):
     party_id: uuid.UUID
     rule_score: float
     vector_score: float
+    llm_score: float
     ai_score: float
     rank: int | None = None
     filter_reasons: dict[str, Any] | None = None

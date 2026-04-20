@@ -145,7 +145,8 @@ class Service(Base):
 
     parties: Mapped[list["Party"]] = relationship("Party", back_populates="service")
 
-from pgvector.sqlalchemy import Vector
+from sqlalchemy import JSON
+
 class PartyEmbedding(Base):
     __tablename__ = "party_embeddings"
 
@@ -167,7 +168,10 @@ class PartyEmbedding(Base):
         nullable=False,
     )
 
-    embedding_vector: Mapped[list[float]] = mapped_column(Vector(1536))
+    embedding_vector: Mapped[list[float] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
