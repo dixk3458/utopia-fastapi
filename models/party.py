@@ -34,34 +34,69 @@ class Party(Base):
     chats: Mapped[list["PartyChat"]] = relationship("PartyChat", back_populates="party")
 
 
+import uuid
+from datetime import datetime
+
+from sqlalchemy import String, ForeignKey, text
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
+
+
+from core.database import Base
+
+
 class PartyMember(Base):
     __tablename__ = "party_members"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
     )
+
     party_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("parties.id"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("parties.id"),
+        nullable=False,
     )
+
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
     )
-    role: Mapped[str] = mapped_column(String(20), nullable=False, server_default="member")
-    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
-    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    left_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    # 승인 플로우 / 빠른매칭 관련 컬럼
-    join_type: Mapped[str | None] = mapped_column(String(20))  # 'apply' | 'match' | 'direct'
+    role: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default="member",
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default="active",
+    )
+
+    joined_at: Mapped[datetime] = mapped_column(
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    left_at: Mapped[datetime | None] = mapped_column()
+
+    join_type: Mapped[str | None] = mapped_column(String(20))
     match_request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    leader_review_status: Mapped[str | None] = mapped_column(String(20))  # 'pending' | 'approved' | 'rejected'
-    matched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    leader_review_status: Mapped[str | None] = mapped_column(String(20))
 
+    matched_at: Mapped[datetime | None] = mapped_column()
+    approved_at: Mapped[datetime | None] = mapped_column()
+    rejected_at: Mapped[datetime | None] = mapped_column()
+
+    # 관계
     party: Mapped["Party"] = relationship("Party", back_populates="members")
     user: Mapped["User"] = relationship("User", back_populates="party_members")
-
 
 class PartyChat(Base):
     __tablename__ = "party_chats"
@@ -109,3 +144,34 @@ class Service(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     parties: Mapped[list["Party"]] = relationship("Party", back_populates="service")
+
+from sqlalchemy import JSON
+
+class PartyEmbedding(Base):
+    __tablename__ = "party_embeddings"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+
+    party_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("parties.id"),
+        unique=True,
+        nullable=False,
+    )
+
+    service_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+    )
+
+    embedding_vector: Mapped[list[float] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)

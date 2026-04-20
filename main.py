@@ -14,8 +14,13 @@ from sqlalchemy import text
 from core.config import settings
 from core.database import AsyncSessionLocal, Base, engine
 from models.admin import ActivityLog
+from routers.mypage import profile
+from routers.quick_match import router as quick_match_router
+
 from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report, ws_notifications, payments
-from routers.mypage import parties as mypage_parties, profile
+
+from routers.mypage import parties as mypage_parties, profile,trust_history
+
 logging.basicConfig(level=logging.DEBUG)
 
 @asynccontextmanager
@@ -172,6 +177,7 @@ async def admin_access_log_middleware(request: Request, call_next):
 # 라우터 등록 (prefix="/api" 유지)
 app.include_router(auth.router, prefix="/api")
 app.include_router(parties.router, prefix="/api")
+app.include_router(quick_match_router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(ws_notifications.router)
 app.include_router(chat.router, prefix="/api")
@@ -183,8 +189,10 @@ app.include_router(assets.router, prefix="/api", tags=["Assets"])
 app.include_router(admin.router, prefix="/api")  # 상원
 app.include_router(report.router, prefix="/api")  
 
+# 마이페이지 라우터
 app.include_router(profile.router, prefix="/api")
 app.include_router(mypage_parties.router, prefix="/api")
+app.include_router(trust_history.router, prefix="/api")
 
 app.include_router(payments.router, prefix="/api")
 
