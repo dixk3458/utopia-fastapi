@@ -213,7 +213,7 @@ async def moderate_in_background(party_id: str, user_id: str, content: str, ws: 
         # 차단 처리
         await redis_client.set(blocked_key(party_id, user_id), "1", ex=REDIS_TTL)
 
-        # ✅ Redis + DB에서 메시지 정확히 삭제
+        # Redis + DB에서 메시지 정확히 삭제
         await delete_message_from_redis(party_id, content)
         await delete_message_from_db(party_id, user_id, content)
 
