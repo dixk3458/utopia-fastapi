@@ -23,9 +23,13 @@ from models.report import Report
 
 from models.notification import Notification
 from models.party import Party, PartyChat, PartyMember, Service
+from models.quick_match.request import QuickMatchRequest
+from models.refresh_token import RefreshToken
+from models.mypage.trust_score import TrustScore
 from models.user import User
 from schemas.admin import (
     AdminDashboardOut,
+    AdminModerationHistoryOut,
     AdminPartyActionIn,
     AdminPartyMemberKickIn,
     AdminPartyMemberOut,
@@ -42,8 +46,12 @@ from schemas.admin import (
     AdminServiceUpdateIn,
     AdminStatusUpdateIn,
     AdminReportStatusUpdateIn,
+    AdminUserAccessLogOut,
     AdminUserDetailOut,
     AdminUserRecordOut,
+    AdminUserStatusLogOut,
+    AdminUserTrustHistoryOut,
+    AdminUserTrustScoreUpdateIn,
     AdminUserStatusUpdateIn,
     DashboardSeriesPointOut,
     ReceiptRecordOut,
@@ -180,6 +188,31 @@ def _actor_display_name(user: User | None, fallback: str | None = None) -> str:
     if user:
         return user.nickname or user.name or str(user.id)
     return fallback or "system"
+
+
+def _build_trust_history_detail(row: TrustScore) -> str | None:
+    parts: list[str] = []
+    if row.previous_score is not None and row.new_score is not None:
+        parts.append(f"{float(row.previous_score):.1f} → {float(row.new_score):.1f}")
+    if row.reference_id:
+        parts.append(f"reference_id: {row.reference_id}")
+    if not parts:
+        return None
+    return " | ".join(parts)
+
+
+def _moderation_action_label(value: str | None) -> str:
+    mapping = {
+        "warn": "경고",
+        "warning": "경고",
+        "ban": "차단",
+        "block": "차단",
+        "suspend": "정지",
+        "mute": "채팅 제한",
+        "review": "검토",
+    }
+    normalized = (value or "").strip().lower()
+    return mapping.get(normalized, value or "-")
 
 
 def _admin_permissions_for_role(role: str) -> dict[str, Any]:
@@ -710,6 +743,35 @@ async def get_admin_dashboard(
             )
         )
     ).scalars().all()
+    current_parties = (
+        await db.execute(
+            select(Party).where(Party.created_at >= current_from, Party.created_at < current_to)
+        )
+    ).scalars().all()
+    comparison_parties = (
+        await db.execute(
+            select(Party).where(
+                Party.created_at >= comparison_from,
+                Party.created_at < comparison_to,
+            )
+        )
+    ).scalars().all()
+    current_quick_match_requests = (
+        await db.execute(
+            select(QuickMatchRequest).where(
+                QuickMatchRequest.created_at >= current_from,
+                QuickMatchRequest.created_at < current_to,
+            )
+        )
+    ).scalars().all()
+    comparison_quick_match_requests = (
+        await db.execute(
+            select(QuickMatchRequest).where(
+                QuickMatchRequest.created_at >= comparison_from,
+                QuickMatchRequest.created_at < comparison_to,
+            )
+        )
+    ).scalars().all()
 
     total_users = await db.scalar(select(func.count()).select_from(User)) or 0
     active_users = await db.scalar(
@@ -740,6 +802,11 @@ async def get_admin_dashboard(
         for settlement in comparison_settlements
         if (settlement.status or "").lower() == "pending"
     )
+    current_parties_count = len(current_parties)
+    comparison_parties_count = len(comparison_parties)
+    current_quick_match_count = len(current_quick_match_requests)
+    comparison_quick_match_count = len(comparison_quick_match_requests)
+    suspended_users_count = int(suspended_users)
 
     approved_amount = current_sales
     pending_amount = sum(
@@ -757,6 +824,8 @@ async def get_admin_dashboard(
         ("members", "신규 가입", "선택 기간 신규 가입 수 비교 그래프", "count"),
         ("reports", "신고 접수", "선택 기간 신고 접수 건수 비교 그래프", "count"),
         ("settlements", "정산 대기", "선택 기간 생성된 대기 정산 비교 그래프", "count"),
+        ("parties", "파티 생성", "선택 기간 파티 생성 추이 비교 그래프", "count"),
+        ("quick_match", "빠른 매칭", "선택 기간 빠른 매칭 요청 추이 비교 그래프", "count"),
     ]
     chart_buckets: dict[str, list[DashboardSeriesPointOut]] = {
         chart_id: [
@@ -830,6 +899,30 @@ async def get_admin_dashboard(
         if bucket in bucket_index:
             chart_buckets["settlements"][bucket_index[bucket]].comparison += 1
 
+    for party in current_parties:
+        bucket = _current_bucket(party.created_at.astimezone(timezone.utc).date())
+        if bucket in bucket_index:
+            chart_buckets["parties"][bucket_index[bucket]].current += 1
+    for party in comparison_parties:
+        bucket = _align_bucket(
+            party.created_at.astimezone(timezone.utc).date(),
+            comparison_start_day,
+        )
+        if bucket in bucket_index:
+            chart_buckets["parties"][bucket_index[bucket]].comparison += 1
+
+    for request in current_quick_match_requests:
+        bucket = _current_bucket(request.created_at.astimezone(timezone.utc).date())
+        if bucket in bucket_index:
+            chart_buckets["quick_match"][bucket_index[bucket]].current += 1
+    for request in comparison_quick_match_requests:
+        bucket = _align_bucket(
+            request.created_at.astimezone(timezone.utc).date(),
+            comparison_start_day,
+        )
+        if bucket in bucket_index:
+            chart_buckets["quick_match"][bucket_index[bucket]].comparison += 1
+
     for receipt in current_receipts:
         if (receipt.status or "").lower() != "approved":
             continue
@@ -878,6 +971,11 @@ async def get_admin_dashboard(
         current_pending_settlements,
         comparison_pending_settlements,
     )
+    party_delta, party_trend = _format_change(current_parties_count, comparison_parties_count)
+    quick_match_delta, quick_match_trend = _format_change(
+        current_quick_match_count,
+        comparison_quick_match_count,
+    )
     comparison_label = (
         "전년 동기 비교"
         if compare_mode == "year_over_year"
@@ -918,6 +1016,22 @@ async def get_admin_dashboard(
                 "delta": settlement_delta,
                 "trend": settlement_trend,
             },
+            {
+                "id": "parties",
+                "label": "파티 생성",
+                "value": f"{current_parties_count:,}",
+                "helper": "선택 기간 내 새로 만들어진 파티 수",
+                "delta": party_delta,
+                "trend": party_trend,
+            },
+            {
+                "id": "quick_match",
+                "label": "빠른 매칭",
+                "value": f"{current_quick_match_count:,}",
+                "helper": "선택 기간 내 빠른 매칭 요청 수",
+                "delta": quick_match_delta,
+                "trend": quick_match_trend,
+            },
         ],
         member_stats=[
             {"label": "전체 회원", "value": f"{total_users:,}"},
@@ -929,6 +1043,9 @@ async def get_admin_dashboard(
             {"label": "승인 금액", "value": f"₩ {int(approved_amount):,}"},
             {"label": "대기 금액", "value": f"₩ {int(pending_amount):,}"},
             {"label": "거절 금액", "value": f"₩ {int(rejected_amount):,}"},
+            {"label": "파티 생성", "value": f"{current_parties_count:,}건"},
+            {"label": "빠른 매칭", "value": f"{current_quick_match_count:,}건"},
+            {"label": "정지/제재", "value": f"{suspended_users_count:,}건"},
             {
                 "label": "비교 기준",
                 "value": (
@@ -1109,6 +1226,7 @@ async def get_admin_users(
                 id=str(user.id),
                 name=user.name,
                 nickname=user.nickname,
+                createdAt=_format_datetime(user.created_at),
                 status=status_label,
                 reportCount=int(report_count),
                 partyCount=int(party_count),
@@ -1147,6 +1265,49 @@ async def get_admin_user_detail(
         .order_by(ActivityLog.created_at.desc())
         .limit(1)
     )
+    recent_token_rows = (
+        await db.execute(
+            select(RefreshToken)
+            .where(RefreshToken.user_id == user.id)
+            .order_by(RefreshToken.created_at.desc())
+            .limit(5)
+        )
+    ).scalars().all()
+    trust_history_rows = (
+        await db.execute(
+            select(TrustScore)
+            .where(TrustScore.user_id == user.id)
+            .order_by(TrustScore.created_at.desc(), TrustScore.id.desc())
+            .limit(10)
+        )
+    ).scalars().all()
+    trust_creator_ids = {
+        row.created_by for row in trust_history_rows if row.created_by is not None
+    }
+    trust_creators: dict[Any, User] = {}
+    if trust_creator_ids:
+        creator_rows = (
+            await db.execute(select(User).where(User.id.in_(trust_creator_ids)))
+        ).scalars().all()
+        trust_creators = {creator.id: creator for creator in creator_rows}
+
+    moderation_rows = (
+        await db.execute(
+            select(ModerationAction)
+            .where(ModerationAction.user_id == user.id)
+            .order_by(ModerationAction.created_at.desc())
+            .limit(10)
+        )
+    ).scalars().all()
+    moderation_actor_ids = {
+        row.admin_id for row in moderation_rows if row.admin_id is not None
+    }
+    moderation_actors: dict[Any, User] = {}
+    if moderation_actor_ids:
+        actor_rows = (
+            await db.execute(select(User).where(User.id.in_(moderation_actor_ids)))
+        ).scalars().all()
+        moderation_actors = {actor.id: actor for actor in actor_rows}
 
     return AdminUserDetailOut(
         id=str(user.id),
@@ -1161,6 +1322,44 @@ async def get_admin_user_detail(
         partyCount=int(party_count),
         createdAt=_format_datetime(user.created_at),
         lastActive=_format_datetime(user.last_login_at or user.updated_at),
+        bannedUntil=_format_datetime(user.banned_until) if user.banned_until else None,
+        recentLoginIp=recent_token_rows[0].ip_address if recent_token_rows else None,
+        recentLoginUserAgent=recent_token_rows[0].user_agent if recent_token_rows else None,
+        recentLoginAt=_format_datetime(recent_token_rows[0].created_at) if recent_token_rows else None,
+        trustHistories=[
+            AdminUserTrustHistoryOut(
+                id=str(row.id),
+                title=row.reason,
+                detail=_build_trust_history_detail(row),
+                scoreChange=float(row.change_amount),
+                trustScoreAfter=float(row.new_score),
+                createdAt=_format_datetime(row.created_at),
+                changedBy=_actor_display_name(trust_creators.get(row.created_by), "system"),
+            )
+            for row in trust_history_rows
+        ],
+        accessLogs=[
+            AdminUserAccessLogOut(
+                id=str(row.id),
+                ipAddress=row.ip_address,
+                userAgent=row.user_agent,
+                createdAt=_format_datetime(row.created_at),
+                isActive=row.revoked_at is None,
+            )
+            for row in recent_token_rows
+        ],
+        moderationHistories=[
+            AdminModerationHistoryOut(
+                id=str(row.id),
+                actionType=_moderation_action_label(row.action_type),
+                reason=row.reason,
+                trustScoreChange=float(row.trust_score_change) if row.trust_score_change is not None else None,
+                durationMinutes=row.duration_minutes,
+                createdAt=_format_datetime(row.created_at),
+                createdBy=_actor_display_name(moderation_actors.get(row.admin_id), "system"),
+            )
+            for row in moderation_rows
+        ],
     )
 
 
@@ -1293,12 +1492,108 @@ async def update_admin_user_status(
         id=str(target_user.id),
         name=target_user.name,
         nickname=target_user.nickname,
+        createdAt=_format_datetime(target_user.created_at),
         status=_user_status_label(target_user, int(report_count), payload.status),
         reportCount=int(report_count),
         partyCount=int(party_count),
         trustScore=float(target_user.trust_score) if target_user.trust_score is not None else 36.5,
         lastActive=_format_relative(target_user.last_login_at or target_user.updated_at),
     )
+
+
+@router.get("/users/{user_id}/status-logs", response_model=list[AdminUserStatusLogOut])
+async def get_admin_user_status_logs(
+    user_id: str,
+    _: AdminContext = Depends(require_admin_user_permission),
+    db: AsyncSession = Depends(get_db),
+):
+    target_user = await db.get(User, user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+
+    rows = (
+        await db.execute(
+            select(ActivityLog)
+            .where(
+                ActivityLog.target_id == target_user.id,
+                ActivityLog.action_type.in_(["STATUS_정상", "STATUS_주의", "STATUS_정지"]),
+            )
+            .order_by(ActivityLog.created_at.desc())
+            .limit(50)
+        )
+    ).scalars().all()
+
+    actor_ids = {row.actor_user_id for row in rows if row.actor_user_id is not None}
+    actors: dict[Any, User] = {}
+    if actor_ids:
+        users = (
+            await db.execute(select(User).where(User.id.in_(actor_ids)))
+        ).scalars().all()
+        actors = {user.id: user for user in users}
+
+    return [
+        AdminUserStatusLogOut(
+            id=str(row.id),
+            toStatus=row.action_type.replace("STATUS_", ""),
+            changedBy=_actor_display_name(actors.get(row.actor_user_id), "system"),
+            reason=row.description,
+            trigger="manual",
+            createdAt=_format_datetime(row.created_at),
+        )
+        for row in rows
+    ]
+
+
+@router.patch("/users/{user_id}/trust-score", response_model=AdminUserDetailOut)
+async def update_admin_user_trust_score(
+    user_id: str,
+    payload: AdminUserTrustScoreUpdateIn,
+    admin: AdminContext = Depends(require_admin_user_permission),
+    db: AsyncSession = Depends(get_db),
+):
+    target_user = await db.get(User, user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+
+    next_score = round(float(payload.trustScore), 1)
+    if next_score < 0 or next_score > 100:
+        raise HTTPException(status_code=400, detail="신뢰도는 0점 이상 100점 이하여야 합니다.")
+
+    previous_score = float(target_user.trust_score) if target_user.trust_score is not None else 36.5
+    target_user.trust_score = next_score
+
+    trust_row = TrustScore(
+        user_id=target_user.id,
+        previous_score=previous_score,
+        new_score=next_score,
+        change_amount=round(next_score - previous_score, 1),
+        reason=(payload.reason or "관리자 수동 조정").strip() or "관리자 수동 조정",
+        created_by=admin.user.id,
+    )
+    db.add(trust_row)
+
+    await _append_activity_log(
+        db,
+        actor_user_id=admin.user.id,
+        action_type="TRUST_SCORE_UPDATED",
+        description=(
+            f"{target_user.nickname} 신뢰도를 {previous_score:.1f} → {next_score:.1f}로 변경"
+            f"{f' ({payload.reason.strip()})' if payload.reason and payload.reason.strip() else ''}"
+        ),
+        path=f"/api/admin/users/{user_id}/trust-score",
+        target_id=target_user.id,
+    )
+    await _append_system_log(
+        db,
+        level="INFO",
+        service="admin",
+        message=f"사용자 신뢰도 변경: {target_user.nickname} {previous_score:.1f} → {next_score:.1f}",
+        actor=admin.user.nickname,
+        admin_id=admin.user.id,
+    )
+    await db.commit()
+
+    return await get_admin_user_detail(user_id, admin, db)
 
 
 @router.get("/parties", response_model=list[AdminPartyRecordOut])
@@ -1364,6 +1659,7 @@ async def get_admin_parties(
             AdminPartyRecordOut(
                 id=str(party.id),
                 title=party.title,
+                createdAt=_format_datetime(party.created_at),
                 service=service.name,
                 category=service.category,
                 leaderId=user.nickname,
@@ -1435,6 +1731,7 @@ async def force_end_admin_party(
     return AdminPartyRecordOut(
         id=str(party.id),
         title=party.title,
+        createdAt=_format_datetime(party.created_at),
         service=service.name if service else "-",
         category=service.category if service else "-",
         leaderId=host.nickname if host else str(party.leader_id),

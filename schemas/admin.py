@@ -43,6 +43,43 @@ class DashboardRecentActivityOut(BaseModel):
     description: str
 
 
+class AdminUserAccessLogOut(BaseModel):
+    id: str
+    ipAddress: str | None = None
+    userAgent: str | None = None
+    createdAt: str
+    isActive: bool = False
+
+
+class AdminUserTrustHistoryOut(BaseModel):
+    id: str
+    title: str
+    detail: str | None = None
+    scoreChange: float
+    trustScoreAfter: float
+    createdAt: str
+    changedBy: str
+
+
+class AdminModerationHistoryOut(BaseModel):
+    id: str
+    actionType: str
+    reason: str | None = None
+    trustScoreChange: float | None = None
+    durationMinutes: int | None = None
+    createdAt: str
+    createdBy: str
+
+
+class AdminUserStatusLogOut(BaseModel):
+    id: str
+    toStatus: str
+    changedBy: str
+    reason: str | None = None
+    trigger: str
+    createdAt: str
+
+
 class AdminDashboardOut(BaseModel):
     metrics: list[DashboardMetricOut]
     member_stats: list[DashboardSummaryRowOut]
@@ -129,6 +166,7 @@ class AdminUserRecordOut(BaseModel):
     id: str
     name: str | None = None
     nickname: str
+    createdAt: str
     status: str
     reportCount: int
     partyCount: int
@@ -149,6 +187,13 @@ class AdminUserDetailOut(BaseModel):
     partyCount: int
     createdAt: str | None = None
     lastActive: str | None = None
+    bannedUntil: str | None = None
+    recentLoginIp: str | None = None
+    recentLoginUserAgent: str | None = None
+    recentLoginAt: str | None = None
+    trustHistories: list[AdminUserTrustHistoryOut] = []
+    accessLogs: list[AdminUserAccessLogOut] = []
+    moderationHistories: list[AdminModerationHistoryOut] = []
 
 
 class AdminUserStatusUpdateIn(BaseModel):
@@ -156,9 +201,15 @@ class AdminUserStatusUpdateIn(BaseModel):
     reason: str | None = None
 
 
+class AdminUserTrustScoreUpdateIn(BaseModel):
+    trustScore: float
+    reason: str | None = None
+
+
 class AdminPartyRecordOut(BaseModel):
     id: str
     title: str
+    createdAt: str
     service: str
     category: str
     leaderId: str
