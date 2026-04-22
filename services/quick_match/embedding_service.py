@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
 
 from core.config import settings
+
+logger = logging.getLogger(__name__)
+
+_embedding_client = httpx.AsyncClient(timeout=30.0)
+_llm_client = httpx.AsyncClient(timeout=60.0)
 
 
 class EmbeddingService:
@@ -15,17 +22,22 @@ class EmbeddingService:
         if not text:
             return []
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            res = await client.post(
-                f"{settings.OLLAMA_URL}/api/embeddings",
-                json={
-                    "model": settings.OLLAMA_EMBED_MODEL,
-                    "prompt": text,
-                },
-            )
-            res.raise_for_status()
-            data = res.json()
-            return data.get("embedding", [])
+        res = await _embedding_client.post(
+            f"{settings.OLLAMA_URL}/api/embeddings",
+            json={
+                "model": settings.OLLAMA_EMBED_MODEL,
+                "prompt": text,
+            },
+        )
+        res.raise_for_status()
+        data = res.json()
+
+        embedding = data.get("embedding", []) or []
+        logger.info(
+            "[EmbeddingService] generate_embedding done dim=%s",
+            len(embedding),
+        )
+        return embedding
 
     @staticmethod
     async def generate_profile_summary(payload: dict) -> str:
@@ -44,18 +56,23 @@ class EmbeddingService:
 {payload}
 """
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            res = await client.post(
-                f"{settings.OLLAMA_URL}/api/generate",
-                json={
-                    "model": settings.OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                },
-            )
-            res.raise_for_status()
-            data = res.json()
-            return str(data.get("response", "") or "").strip()
+        res = await _llm_client.post(
+            f"{settings.OLLAMA_URL}/api/generate",
+            json={
+                "model": settings.OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+            },
+        )
+        res.raise_for_status()
+        data = res.json()
+
+        summary = str(data.get("response", "") or "").strip()
+        logger.info(
+            "[EmbeddingService] generate_profile_summary done length=%s",
+            len(summary),
+        )
+        return summary
 
     @staticmethod
     async def generate_match_evaluation(payload: dict) -> dict:
@@ -90,34 +107,38 @@ reason: <한 줄 설명>
         reason = "룰 적합도와 임베딩 유사도를 함께 반영한 LLM 재판단"
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                res = await client.post(
-                    f"{settings.OLLAMA_URL}/api/generate",
-                    json={
-                        "model": settings.OLLAMA_MODEL,
-                        "prompt": prompt,
-                        "stream": False,
-                    },
-                )
-                res.raise_for_status()
-                data = res.json()
-                text = str(data.get("response", "") or "")
+            res = await _llm_client.post(
+                f"{settings.OLLAMA_URL}/api/generate",
+                json={
+                    "model": settings.OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                },
+            )
+            res.raise_for_status()
+            data = res.json()
+            text = str(data.get("response", "") or "")
 
-                parsed_score = score
-                parsed_reason = reason
-                for line in text.splitlines():
-                    stripped = line.strip()
-                    if stripped.lower().startswith("score:"):
-                        raw_value = stripped.split(":", 1)[1].strip()
-                        parsed_score = float(raw_value)
-                    elif stripped.lower().startswith("reason:"):
-                        parsed_reason = stripped.split(":", 1)[1].strip() or reason
+            parsed_score = score
+            parsed_reason = reason
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.lower().startswith("score:"):
+                    raw_value = stripped.split(":", 1)[1].strip()
+                    parsed_score = float(raw_value)
+                elif stripped.lower().startswith("reason:"):
+                    parsed_reason = stripped.split(":", 1)[1].strip() or reason
 
-                score = round(min(1.0, max(0.0, parsed_score)), 4)
-                reason = parsed_reason
-        except Exception:
-            # LLM 호출 실패 시 전체 빠른매칭이 멈추지 않도록 룰/벡터 기반 대체 점수 사용
-            pass
+            score = round(min(1.0, max(0.0, parsed_score)), 4)
+            reason = parsed_reason
+
+        except Exception as e:
+            logger.warning(
+                "[EmbeddingService] generate_match_evaluation fallback rule_score=%.4f vector_score=%.4f error=%s",
+                rule_score,
+                vector_score,
+                str(e),
+            )
 
         return {
             "score": score,

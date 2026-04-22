@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
 import time
@@ -21,10 +20,18 @@ from models.quick_match.result import QuickMatchResult
 from models.user import User
 from services.quick_match.embedding_service import EmbeddingService
 
+
+from services.notifications.party_notification_service import (
+    notify_quick_match_completed,
+    notify_quick_match_member_joined_to_leader,
+)
+
 logger = logging.getLogger(__name__)
 
 
 class QuickMatchService:
+    LLM_TOP_N = 3
+
     async def create_request(
         self,
         db: AsyncSession,
@@ -74,8 +81,22 @@ class QuickMatchService:
             preferred_conditions=normalized_conditions,
         )
 
+        summary_start = time.perf_counter()
         summary = await EmbeddingService.generate_profile_summary(ai_profile)
+        logger.info(
+            "[QuickMatch] profile summary done user_id=%s elapsed=%.3fs",
+            user_id,
+            time.perf_counter() - summary_start,
+        )
+
+        user_embedding_start = time.perf_counter()
         embedding_vector = await EmbeddingService.generate_embedding({"text": summary})
+        logger.info(
+            "[QuickMatch] user embedding done user_id=%s dim=%s elapsed=%.3fs",
+            user_id,
+            len(embedding_vector or []),
+            time.perf_counter() - user_embedding_start,
+        )
 
         existing_embedding_result = await db.execute(
             select(PartyMatchEmbedding).where(
@@ -192,8 +213,12 @@ class QuickMatchService:
             raise Exception("NO_RECRUITING_PARTY")
 
         existing_members_result = await db.execute(
-            select(PartyMember.party_id).where(
+            select(PartyMember.party_id)
+            .join(Party, PartyMember.party_id == Party.id)
+            .where(
                 PartyMember.user_id == request.user_id,
+                PartyMember.status == "active",
+                Party.service_id == request.service_id,
             )
         )
         joined_party_ids = set(existing_members_result.scalars().all())
@@ -203,7 +228,6 @@ class QuickMatchService:
         user_profile = request.ai_profile_snapshot or {}
 
         normal_candidates_base: list[dict[str, Any]] = []
-        fallback_candidates: list[dict[str, Any]] = []
 
         for party in parties:
             filter_reasons: dict[str, Any] = {
@@ -266,12 +290,6 @@ class QuickMatchService:
             )
             filter_reasons["rule_reason"] = rule_reason
 
-            fallback_ok, fallback_reason = self._matches_fallback_core_conditions(
-                party=party,
-                preferred_conditions=preferred_conditions,
-            )
-            filter_reasons["fallback_core_reason"] = fallback_reason
-
             party_profile = self._build_party_profile(party)
 
             if user_embedding and user_embedding.embedding_vector:
@@ -313,46 +331,108 @@ class QuickMatchService:
                     request.user_id,
                 )
 
-            if fallback_ok:
-                fallback_filter_reasons = dict(filter_reasons)
-                fallback_filter_reasons["match_mode"] = "fallback"
+        normal_candidates_base.sort(
+            key=lambda item: (
+                float(item["vector_score"]),
+                float(item["rule_score"]),
+            ),
+            reverse=True,
+        )
 
-                fallback_score = self._calculate_fallback_score(
-                    party=party,
-                    user_trust_score=user_trust_score,
-                    preferred_conditions=preferred_conditions,
-                )
+        llm_target_candidates = normal_candidates_base[: self.LLM_TOP_N]
+        non_llm_candidates = normal_candidates_base[self.LLM_TOP_N :]
 
-                fallback_candidates.append(
-                    {
-                        "party": party,
-                        "rule_score": rule_score,
-                        "vector_score": 0.0,
-                        "llm_score": 0.0,
-                        "ai_score": fallback_score,
-                        "filter_reasons": fallback_filter_reasons,
-                    }
-                )
+        logger.info(
+            "[QuickMatch] llm target request_id=%s total_normal=%s llm_top_n=%s actual_llm_targets=%s",
+            request.id,
+            len(normal_candidates_base),
+            self.LLM_TOP_N,
+            len(llm_target_candidates),
+        )
 
         normal_candidates: list[dict[str, Any]] = []
-        if normal_candidates_base:
-            llm_results = await asyncio.gather(
-                *[
-                    EmbeddingService.generate_match_evaluation(
-                        {
-                            "user_profile": user_profile,
-                            "party_profile": item["party_profile"],
-                            "rule_score": item["rule_score"],
-                            "vector_score": item["vector_score"],
-                        }
-                    )
-                    for item in normal_candidates_base
-                ],
-                return_exceptions=True,
+
+        if llm_target_candidates:
+            llm_start = time.perf_counter()
+
+            batch_candidates = [
+                {
+                    "party_id": str(item["party"].id),
+                    "party_profile": {
+                        "party_id": str(item["party"].id),
+                        "service_name": item["party_profile"].get("service_name"),
+                        "monthly_per_person": item["party_profile"].get("monthly_per_person"),
+                        "min_trust_score": item["party_profile"].get("min_trust_score"),
+                        "max_members": item["party_profile"].get("max_members"),
+                        "current_members": item["party_profile"].get("current_members"),
+                        "duration_preference": item["party_profile"].get("duration_preference"),
+                        "status": item["party_profile"].get("status"),
+                    },
+                    "rule_score": float(item["rule_score"]),
+                    "vector_score": float(item["vector_score"]),
+                }
+                for item in llm_target_candidates
+            ]
+
+            slim_user_profile = {
+                "user_id": user_profile.get("user_id"),
+                "service_id": user_profile.get("service_id"),
+                "trust_score": user_profile.get("trust_score"),
+                "preferred_conditions": user_profile.get("preferred_conditions", {}),
+                "activity_summary": {
+                    "service_party_join_count": (
+                        (user_profile.get("activity_summary") or {}).get("service_party_join_count")
+                    ),
+                    "active_party_count": (
+                        (user_profile.get("activity_summary") or {}).get("active_party_count")
+                    ),
+                },
+                "risk_summary": {
+                    "report_count": ((user_profile.get("risk_summary") or {}).get("report_count")),
+                    "leave_count": ((user_profile.get("risk_summary") or {}).get("leave_count")),
+                    "is_currently_banned": (
+                        (user_profile.get("risk_summary") or {}).get("is_currently_banned")
+                    ),
+                },
+            }
+
+            try:
+                llm_results = await EmbeddingService.generate_batch_match_evaluation(
+                    {
+                        "user_profile": slim_user_profile,
+                        "candidates": batch_candidates,
+                    }
+                )
+            except Exception as e:
+                logger.exception(
+                    "[QuickMatch] batch llm evaluation failed request_id=%s error=%s",
+                    request.id,
+                    str(e),
+                )
+                llm_results = []
+
+            logger.info(
+                "[QuickMatch] llm batch evaluation done request_id=%s count=%s elapsed=%.3fs",
+                request.id,
+                len(llm_target_candidates),
+                time.perf_counter() - llm_start,
             )
 
-            for item, llm_result in zip(normal_candidates_base, llm_results):
-                if isinstance(llm_result, Exception):
+            llm_result_map: dict[str, dict[str, Any]] = {}
+            if isinstance(llm_results, list):
+                for row in llm_results:
+                    if not isinstance(row, dict):
+                        continue
+                    party_id = str(row.get("party_id") or "")
+                    if not party_id:
+                        continue
+                    llm_result_map[party_id] = row
+
+            for item in llm_target_candidates:
+                party_id = str(item["party"].id)
+                llm_result = llm_result_map.get(party_id)
+
+                if not llm_result:
                     llm_score = round(
                         min(
                             1.0,
@@ -364,14 +444,16 @@ class QuickMatchService:
                         ),
                         4,
                     )
-                    llm_reason = "LLM 호출 실패로 rule/vector 기반 대체 점수 사용"
+                    llm_reason = "batch LLM 결과 없음으로 rule/vector 기반 대체 점수 사용"
                 else:
-                    llm_score = float(llm_result.get("score", 0) or 0)
-                    llm_reason = llm_result.get("reason")
+                    llm_score = round(float(llm_result.get("score", 0) or 0), 4)
+                    llm_reason = llm_result.get("reason") or "batch LLM 평가 완료"
 
                 normal_filter_reasons = dict(item["filter_reasons"])
                 normal_filter_reasons["llm_reason"] = llm_reason
                 normal_filter_reasons["match_mode"] = "normal"
+                normal_filter_reasons["llm_evaluated"] = True
+                normal_filter_reasons["llm_batch"] = True
 
                 ai_score = self._calculate_ai_score(
                     rule_score=float(item["rule_score"]),
@@ -390,11 +472,80 @@ class QuickMatchService:
                     }
                 )
 
-        selected_pool: list[dict[str, Any]] = []
-        if normal_candidates:
-            selected_pool = normal_candidates
-        elif fallback_candidates:
-            selected_pool = fallback_candidates
+                selected_pool: list[dict[str, Any]] = []
+                fallback_candidates: list[dict[str, Any]] = []
+
+                if normal_candidates:
+                    selected_pool = normal_candidates
+                else:
+                    logger.info(
+                        "[QuickMatch] normal candidate empty, start fallback request_id=%s",
+                        request.id,
+                    )
+
+                for party in parties:
+                    filter_reasons: dict[str, Any] = {
+                        "service_match": True,
+                        "recruiting_status": party.status == "recruiting",
+                    }
+
+                    party_max_members = int(getattr(party, "max_members", 0) or 0)
+                    party_current_members = int(getattr(party, "current_members", 0) or 0)
+
+                    remaining_seat = max((party_max_members - party_current_members), 0)
+                    filter_reasons["remaining_seat"] = remaining_seat
+                    if party_current_members >= party_max_members:
+                        continue
+
+                    min_trust_score = float(getattr(party, "min_trust_score", 0) or 0)
+                    filter_reasons["party_min_trust_score"] = min_trust_score
+                    filter_reasons["user_trust_score"] = user_trust_score
+                    if user_trust_score < min_trust_score:
+                        continue
+
+                    if self._is_policy_excluded(user=user, party=party):
+                        continue
+
+                    if party.id in joined_party_ids:
+                        continue
+
+                    rule_score, rule_reason = self._calculate_rule_score(
+                        party=party,
+                        user_trust_score=user_trust_score,
+                        preferred_conditions=preferred_conditions,
+                    )
+                    filter_reasons["rule_reason"] = rule_reason
+
+                    fallback_ok, fallback_reason = self._matches_fallback_core_conditions(
+                        party=party,
+                        preferred_conditions=preferred_conditions,
+                    )
+                    filter_reasons["fallback_core_reason"] = fallback_reason
+
+                    if not fallback_ok:
+                        continue
+
+                    fallback_filter_reasons = dict(filter_reasons)
+                    fallback_filter_reasons["match_mode"] = "fallback"
+
+                    fallback_score = self._calculate_fallback_score(
+                        party=party,
+                        user_trust_score=user_trust_score,
+                        preferred_conditions=preferred_conditions,
+                    )
+
+                    fallback_candidates.append(
+                        {
+                            "party": party,
+                            "rule_score": rule_score,
+                            "vector_score": 0.0,
+                            "llm_score": 0.0,
+                            "ai_score": fallback_score,
+                            "filter_reasons": fallback_filter_reasons,
+                        }
+                    )
+
+                selected_pool = fallback_candidates
 
         if not selected_pool:
             rejected_result = await db.execute(
@@ -507,6 +658,7 @@ class QuickMatchService:
         party = await db.get(Party, candidate.party_id)
         if not party:
             raise Exception("PARTY_NOT_FOUND")
+        
 
         party_current_members = int(getattr(party, "current_members", 0) or 0)
         party_max_members = int(getattr(party, "max_members", 0) or 0)
@@ -557,6 +709,7 @@ class QuickMatchService:
 
         await db.commit()
         await db.refresh(result_row)
+
 
         elapsed = time.perf_counter() - start_time
         logger.info(
@@ -665,6 +818,23 @@ class QuickMatchService:
 
             await db.commit()
             await db.refresh(new_member)
+
+            user = await db.get(User, request.user_id)
+
+            await notify_quick_match_completed(
+                db=db,
+                party=party,
+                member_user_id=request.user_id,
+                match_request_id=request.id,
+            )
+
+            await notify_quick_match_member_joined_to_leader(
+                db=db,
+                party=party,
+                member_user_id=request.user_id,
+                member_nickname=user.nickname,
+                match_request_id=request.id,
+            )
 
             elapsed = time.perf_counter() - start_time
             logger.info(
@@ -925,9 +1095,21 @@ class QuickMatchService:
         party_embedding = party_embedding_result.scalar_one_or_none()
 
         if party_embedding and party_embedding.embedding_vector:
+            logger.info(
+                "[QuickMatch] party embedding cache hit party_id=%s",
+                party.id,
+            )
             return party_embedding
 
+        embedding_start = time.perf_counter()
         embedding_vector = await EmbeddingService.generate_party_embedding(party_profile)
+        logger.info(
+            "[QuickMatch] party embedding generated party_id=%s dim=%s elapsed=%.3fs",
+            party.id,
+            len(embedding_vector or []),
+            time.perf_counter() - embedding_start,
+        )
+
         if not embedding_vector:
             return party_embedding
 
