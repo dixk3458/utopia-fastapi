@@ -9,12 +9,8 @@ import json
 import asyncpg
 import httpx
 import redis.asyncio as redis
-<<<<<<< Updated upstream
 from fastapi import APIRouter, Depends, HTTPException, Query
-=======
-from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
->>>>>>> Stashed changes
 from minio import Minio
 from minio.error import S3Error
 
@@ -285,7 +281,7 @@ async def get_admin_handocr_image(
             media_type=content_type,
             headers={
                 "Cache-Control": "private, max-age=300",
-                "Content-Disposition": f'inline; filename=\"{key.split("/")[-1]}\"',
+                "Content-Disposition": f'inline; filename=\"{key.split('/')[-1]}\"',
             },
         )
     except S3Error as e:
