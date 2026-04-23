@@ -3276,3 +3276,62 @@ async def list_captcha_sessions(
                 "total_pages": 0,
             }
         raise
+
+@router.get("/moderation/chat-trend", response_model=list[dict])
+async def get_chat_moderation_trend(
+    _: AdminContext = Depends(require_admin_moderation_permission),
+    db: AsyncSession = Depends(get_db),
+    period: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
+):
+    from datetime import date as date_type
+    e_date = date.today()
+    if period == "daily":
+        s_date = e_date - timedelta(days=6)
+    elif period == "weekly":
+        s_date = e_date - timedelta(weeks=8)
+    else:
+        s_date = e_date - timedelta(days=180)
+
+    if start_date:
+        s_date = date_type.fromisoformat(start_date)
+    if end_date:
+        e_date = date_type.fromisoformat(end_date)
+
+    start_dt = datetime(s_date.year, s_date.month, s_date.day, tzinfo=timezone.utc)
+    end_dt = datetime(e_date.year, e_date.month, e_date.day, tzinfo=timezone.utc) + timedelta(days=1)
+
+    if period == "daily":
+        trunc = "day"
+    elif period == "weekly":
+        trunc = "week"
+    else:
+        trunc = "month"
+
+    result = await db.execute(text(f"""
+        SELECT
+            DATE_TRUNC('{trunc}', created_at)::date AS label,
+            COUNT(*) FILTER (WHERE moderation_status = 'blocked') AS blocked,
+            COUNT(*) FILTER (WHERE moderation_status = 'warned') AS warned,
+            COUNT(*) FILTER (WHERE moderation_status = 'false_positive') AS false_positive,
+            COUNT(*) AS total
+        FROM party_chats
+        WHERE is_flagged = TRUE
+          AND created_at >= :start
+          AND created_at < :end
+        GROUP BY label
+        ORDER BY label
+    """), {"start": start_dt, "end": end_dt})
+
+    rows = result.mappings().all()
+    return [
+        {
+            "date": str(row["label"]),
+            "blocked": row["blocked"] or 0,
+            "warned": row["warned"] or 0,
+            "false_positive": row["false_positive"] or 0,
+            "total": row["total"] or 0,
+        }
+        for row in rows
+    ]
