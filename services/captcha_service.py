@@ -122,7 +122,7 @@ ANIMAL_LABELS: dict[str, str] = {
     "dog": "강아지",
     "elephant": "코끼리",
     "fox": "여우",
-    "horse": "말",
+    "rabbit": "토끼",
     "lion": "사자",
     "penguin": "펭귄",
     "tiger": "호랑이",
