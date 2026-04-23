@@ -417,11 +417,11 @@ async def apply_to_party(
     pending_count_row = await db.execute(
         select(func.count(PartyMember.id)).where(
             PartyMember.party_id == party_id,
-            PartyMember.status.in_(["active", "pending"]),
+            PartyMember.status == "active",
         )
     )
-    pending_plus_active = pending_count_row.scalar() or 0
-    effective_count = pending_plus_active + (1 if party.leader_id else 0)
+    active_count = pending_count_row.scalar() or 0
+    effective_count = active_count + (1 if party.leader_id else 0)
     if effective_count >= (party.max_members or 0):
         raise HTTPException(status_code=400, detail="파티 인원이 가득 찼거나 대기자가 많습니다.")
 
@@ -548,7 +548,7 @@ async def leave_party(
     try:
         member.status = "left"
         member.left_at = func.now()
-        party.current_members = max(0, _party_member_count(party) - 1)
+        party.current_members = max(0, (party.current_members or 1) - 1)
 
         await create_activity_log(
             db=db,
@@ -594,7 +594,7 @@ async def kick_member(
     try:
         target.status = "kicked"
         target.left_at = func.now()
-        party.current_members = max(0, _party_member_count(party) - 1)
+        party.current_members = max(0, (party.current_members or 1) - 1)
         await db.commit()
     except Exception as e:
         await db.rollback()
@@ -703,7 +703,7 @@ async def approve_application(
     if target is None:
         raise HTTPException(status_code=404, detail="대기 중인 신청을 찾을 수 없습니다.")
 
-    current_count = party.current_members or 0
+    current_count = party.current_members if party.current_members is not None else _party_member_count(party)
     if current_count >= (party.max_members or 0):
         raise HTTPException(status_code=400, detail="파티 정원이 가득 차서 승인할 수 없습니다.")
 
