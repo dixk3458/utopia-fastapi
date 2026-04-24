@@ -160,7 +160,8 @@ async def unblock_chat_user(user_id: str, _: object = Depends(require_admin_mode
         await redis_client.delete(*warn_keys)
 
     try:
-        from sqlalchemy import update as sa_update
+        from sqlalchemy import update as sa_update, desc
+        from models.mypage.trust_score import TrustScore
         user_uuid = uuid.UUID(user_id)
         async with AsyncSessionLocal() as db:
             # 2) DB: is_active 복구, banned_until 초기화, chat_warn_count 리셋
@@ -170,7 +171,34 @@ async def unblock_chat_user(user_id: str, _: object = Depends(require_admin_mode
                 user.is_active = True
                 user.banned_until = None
                 user.chat_warn_count = 0
-            # 3) DB: PartyMember banned → active 복구
+
+                # 3) 채팅 욕설로 깎인 신뢰도 점수 복구
+                # 최근 욕설 감지 패널티 이력 합산 후 되돌리기
+                penalty_result = await db.execute(
+                    select(TrustScore)
+                    .where(
+                        TrustScore.user_id == user_uuid,
+                        TrustScore.reason.like("%욕설 감지%") | TrustScore.reason.like("%심한 욕설%"),
+                    )
+                    .order_by(desc(TrustScore.created_at))
+                    .limit(10)
+                )
+                penalties = penalty_result.scalars().all()
+                restore_amount = round(sum(abs(float(p.change_amount)) for p in penalties), 1)
+                if restore_amount > 0:
+                    previous = float(user.trust_score) if user.trust_score is not None else 0.0
+                    new_score = min(99.0, round(previous + restore_amount, 1))
+                    user.trust_score = new_score
+                    db.add(TrustScore(
+                        user_id=user_uuid,
+                        previous_score=previous,
+                        new_score=new_score,
+                        change_amount=round(new_score - previous, 1),
+                        reason="관리자 채팅 차단 해제 — 신뢰도 복구",
+                        created_by=user_uuid,
+                    ))
+
+            # 4) DB: PartyMember banned → active 복구
             await db.execute(
                 sa_update(PartyMember)
                 .where(PartyMember.user_id == user_uuid, PartyMember.status == "banned")
