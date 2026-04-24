@@ -2,9 +2,20 @@ from __future__ import annotations
 
 from collections import Counter
 from typing import Annotated
+from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
+from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -16,7 +27,7 @@ from models.user import User
 from schemas.report import ReportResponse, ReportSummaryResponse
 from services.notifications.report_notification_service import notify_report_submitted
 from services.report_storage_service import (
-    get_report_file_presigned_url,
+    get_report_file_bytes,
     upload_report_file,
 )
 from services.report_target_service import resolve_target_snapshot_name
@@ -55,7 +66,7 @@ def build_report_response(report: Report) -> ReportResponse:
                 "content_type": evidence.content_type,
                 "file_size": evidence.file_size,
                 "created_at": evidence.created_at,
-                "url": get_report_file_presigned_url(evidence.object_key),
+                "url": f"/api/reports/evidences/{evidence.id}/file",
             }
             for evidence in report.evidences
         ],
@@ -215,6 +226,42 @@ async def create_report(
     except Exception:
         await db.rollback()
         raise
+
+
+@router.get("/evidences/{evidence_id}/file")
+async def get_my_report_evidence_file(
+    evidence_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(ReportEvidence)
+        .join(Report, ReportEvidence.report_id == Report.id)
+        .where(
+            ReportEvidence.id == evidence_id,
+            Report.reporter_id == current_user.id,
+        )
+    )
+
+    evidence = result.scalar_one_or_none()
+
+    if evidence is None:
+        raise HTTPException(
+            status_code=404,
+            detail="증빙 파일을 찾을 수 없습니다.",
+        )
+
+    file_bytes, content_type = get_report_file_bytes(evidence.object_key)
+    filename = evidence.original_filename or evidence.object_key.rsplit("/", 1)[-1]
+
+    return Response(
+        content=file_bytes,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
+            "Cache-Control": "private, max-age=60",
+        },
+    )
 
 
 @router.get("", response_model=list[ReportResponse])

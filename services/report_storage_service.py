@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 import uuid
 from datetime import timedelta
 from io import BytesIO
@@ -116,4 +117,35 @@ def get_report_file_presigned_url(
         raise HTTPException(
             status_code=500,
             detail="증빙 파일 조회 URL 생성에 실패했습니다.",
+        ) from e
+
+
+def get_report_file_bytes(object_key: str) -> tuple[bytes, str]:
+    try:
+        client = build_minio_client()
+        ensure_report_bucket_exists()
+
+        response = client.get_object(
+            bucket_name=REPORT_BUCKET,
+            object_name=object_key,
+        )
+
+        try:
+            file_bytes = response.read()
+            content_type = (
+                response.headers.get("Content-Type")
+                or mimetypes.guess_type(object_key)[0]
+                or "application/octet-stream"
+            )
+
+            return file_bytes, content_type
+
+        finally:
+            response.close()
+            response.release_conn()
+
+    except S3Error as e:
+        raise HTTPException(
+            status_code=404,
+            detail="증빙 파일을 찾을 수 없습니다.",
         ) from e
