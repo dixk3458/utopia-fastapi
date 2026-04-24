@@ -19,6 +19,7 @@ class ReportEvidenceResponse(BaseModel):
     content_type: str | None = None
     file_size: int | None = None
     created_at: datetime
+    url: str | None = None
 
     model_config = {"from_attributes": True}
 
