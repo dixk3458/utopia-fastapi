@@ -2,13 +2,14 @@ import json
 import uuid
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException
+from routers.admin.deps import require_admin_moderation_permission
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
 from typing import Optional
 from core.database import get_db, AsyncSessionLocal
 from core.config import settings
-from models.party import PartyChat
+from models.party import PartyChat, PartyMember
 from models.user import User
 import redis.asyncio as aioredis
 
@@ -49,7 +50,7 @@ async def save_config(config: dict):
 # ── 설정 조회/저장 ──
 
 @router.get("/config")
-async def get_moderation_config():
+async def get_moderation_config(_: object = Depends(require_admin_moderation_permission)):
     return await get_config()
 
 
@@ -65,7 +66,7 @@ class ConfigUpdate(BaseModel):
 
 
 @router.patch("/config")
-async def update_moderation_config(body: ConfigUpdate):
+async def update_moderation_config(body: ConfigUpdate, _: object = Depends(require_admin_moderation_permission)):
     config = await get_config()
     update_data = body.model_dump(exclude_none=True)
     config.update(update_data)
@@ -74,7 +75,7 @@ async def update_moderation_config(body: ConfigUpdate):
 
 
 @router.post("/config/reset")
-async def reset_moderation_config():
+async def reset_moderation_config(_: object = Depends(require_admin_moderation_permission)):
     await save_config(DEFAULT_CONFIG.copy())
     return DEFAULT_CONFIG
 
@@ -86,7 +87,7 @@ class WordBody(BaseModel):
 
 
 @router.post("/whitelist")
-async def add_whitelist(body: WordBody):
+async def add_whitelist(body: WordBody, _: object = Depends(require_admin_moderation_permission)):
     config = await get_config()
     if body.word not in config["whitelist"]:
         config["whitelist"].append(body.word)
@@ -95,7 +96,7 @@ async def add_whitelist(body: WordBody):
 
 
 @router.delete("/whitelist/{word}")
-async def remove_whitelist(word: str):
+async def remove_whitelist(word: str, _: object = Depends(require_admin_moderation_permission)):
     config = await get_config()
     config["whitelist"] = [w for w in config["whitelist"] if w != word]
     await save_config(config)
@@ -103,7 +104,7 @@ async def remove_whitelist(word: str):
 
 
 @router.post("/blacklist")
-async def add_blacklist(body: WordBody):
+async def add_blacklist(body: WordBody, _: object = Depends(require_admin_moderation_permission)):
     config = await get_config()
     if body.word not in config["blacklist"]:
         config["blacklist"].append(body.word)
@@ -112,7 +113,7 @@ async def add_blacklist(body: WordBody):
 
 
 @router.delete("/blacklist/{word}")
-async def remove_blacklist(word: str):
+async def remove_blacklist(word: str, _: object = Depends(require_admin_moderation_permission)):
     config = await get_config()
     config["blacklist"] = [w for w in config["blacklist"] if w != word]
     await save_config(config)
@@ -122,7 +123,7 @@ async def remove_blacklist(word: str):
 # ── 파인튜닝 데이터 현황 ──
 
 @router.get("/finetune/stats")
-async def get_finetune_stats(db: AsyncSession = Depends(get_db)):
+async def get_finetune_stats(db: AsyncSession = Depends(get_db), _: object = Depends(require_admin_moderation_permission)):
     result = await db.execute(
         select(PartyChat.moderation_status, func.count())
         .where(PartyChat.is_flagged == True)
@@ -150,20 +151,60 @@ async def get_finetune_stats(db: AsyncSession = Depends(get_db)):
 # ── 채팅 차단 해제 ──
 
 @router.post("/unblock/user/{user_id}")
-async def unblock_chat_user(user_id: str):
-    """채팅 욕설로 차단된 유저 해제 — Redis 차단 삭제 + is_active 복구 + banned_until 초기화"""
-    # Redis 채팅 차단 해제
+async def unblock_chat_user(user_id: str, _: object = Depends(require_admin_moderation_permission)):
+    """채팅 욕설로 차단된 유저 완전 해제"""
+    # 1) Redis: 채팅 블럭 + warn 카운트 키 전부 삭제
     await redis_client.delete(f"blocked:user:{user_id}")
+    warn_keys = await redis_client.keys(f"warn:*:{user_id}")
+    if warn_keys:
+        await redis_client.delete(*warn_keys)
 
     try:
+        from sqlalchemy import update as sa_update, desc
+        from models.mypage.trust_score import TrustScore
         user_uuid = uuid.UUID(user_id)
         async with AsyncSessionLocal() as db:
+            # 2) DB: is_active 복구, banned_until 초기화, chat_warn_count 리셋
             result = await db.execute(select(User).where(User.id == user_uuid))
             user = result.scalar_one_or_none()
             if user:
                 user.is_active = True
                 user.banned_until = None
-                await db.commit()
+                user.chat_warn_count = 0
+
+                # 3) 채팅 욕설로 깎인 신뢰도 점수 복구
+                # 최근 욕설 감지 패널티 이력 합산 후 되돌리기
+                penalty_result = await db.execute(
+                    select(TrustScore)
+                    .where(
+                        TrustScore.user_id == user_uuid,
+                        TrustScore.reason.like("%욕설 감지%") | TrustScore.reason.like("%심한 욕설%"),
+                    )
+                    .order_by(desc(TrustScore.created_at))
+                    .limit(10)
+                )
+                penalties = penalty_result.scalars().all()
+                restore_amount = round(sum(abs(float(p.change_amount)) for p in penalties), 1)
+                if restore_amount > 0:
+                    previous = float(user.trust_score) if user.trust_score is not None else 0.0
+                    new_score = min(99.0, round(previous + restore_amount, 1))
+                    user.trust_score = new_score
+                    db.add(TrustScore(
+                        user_id=user_uuid,
+                        previous_score=previous,
+                        new_score=new_score,
+                        change_amount=round(new_score - previous, 1),
+                        reason="관리자 채팅 차단 해제 — 신뢰도 복구",
+                        created_by=user_uuid,
+                    ))
+
+            # 4) DB: PartyMember banned → active 복구
+            await db.execute(
+                sa_update(PartyMember)
+                .where(PartyMember.user_id == user_uuid, PartyMember.status == "banned")
+                .values(status="active")
+            )
+            await db.commit()
     except Exception as e:
         print(f"[UNBLOCK USER ERROR] {e}")
 
@@ -173,7 +214,7 @@ async def unblock_chat_user(user_id: str):
 # ── 채팅 IP 벤 목록 조회 / 해제 ──
 
 @router.get("/chat-bans")
-async def list_chat_bans():
+async def list_chat_bans(_: object = Depends(require_admin_moderation_permission)):
     """채팅 욕설로 IP 벤된 목록 (ip:banned:* 키 기준)"""
     keys = await redis_client.keys("ip:banned:*")
     result = []
@@ -185,7 +226,7 @@ async def list_chat_bans():
 
 
 @router.delete("/unblock/ip/{ip}")
-async def unblock_ip_ban(ip: str):
+async def unblock_ip_ban(ip: str, _: object = Depends(require_admin_moderation_permission)):
     """채팅 IP 벤 해제"""
     await redis_client.delete(f"ip:banned:{ip}")
     return {"unblocked": True, "ip": ip}
