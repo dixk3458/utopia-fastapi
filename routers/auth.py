@@ -109,15 +109,6 @@ async def create_activity_log(
     ip_address: Optional[str] = None,
     user_agent: Optional[str] = None,
 ) -> None:
-    """
-    최근 활동 내역용 공통 로그 적재
-    profile_service.py 기준 필드명:
-    - actor_user_id
-    - action_type
-    - description
-    - extra_metadata
-    - target_id
-    """
     log = ActivityLog(
         actor_user_id=user_id,
         action_type=action,
@@ -164,7 +155,11 @@ async def refresh_token_api(
             detail="재사용된 refresh token이 감지되어 모든 세션이 종료되었습니다.",
         )
 
-    if token_row.expires_at <= datetime.now(timezone.utc):
+    # timezone-aware 비교 (DB에서 naive datetime으로 올 경우 UTC로 처리)
+    expires_at = token_row.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="만료된 refresh token입니다.",
@@ -301,7 +296,6 @@ async def social_login(data: SocialLoginBody, response: Response, request: Reque
     result = await db.execute(select(User).where(User.provider == oauth, User.provider_id == oauth_id))
     user = result.scalar_one_or_none()
     if user:
-        # 채팅 IP 벤 체크
         client_ip = request.client.host if request.client else None
         if client_ip:
             is_ip_banned = await redis_client.get(f"ip:banned:{client_ip}")
@@ -381,7 +375,6 @@ async def social_login(data: SocialLoginBody, response: Response, request: Reque
 
 @router.post("/auth/social/signup")
 async def social_signup(data: SocialSignupBody, response: Response, request: Request, db: AsyncSession = Depends(get_db)):
-    # 채팅 IP 벤 체크
     client_ip = request.client.host if request.client else None
     if client_ip:
         is_ip_banned = await redis_client.get(f"ip:banned:{client_ip}")
@@ -483,7 +476,6 @@ async def signup(
     user: UserCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    # 채팅 IP 벤 체크
     client_ip = request.client.host if request.client else None
     if client_ip:
         is_ip_banned = await redis_client.get(f"ip:banned:{client_ip}")
@@ -727,7 +719,6 @@ async def login(
         raise HTTPException(status_code=400, detail="소셜 로그인으로 가입한 계정입니다.")
     if not verify_password(user_credentials.password, user.password_hash):
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 일치하지 않습니다.")
-    # 채팅 IP 벤 체크
     client_ip = request.client.host if request.client else None
     if client_ip:
         is_ip_banned = await redis_client.get(f"ip:banned:{client_ip}")
