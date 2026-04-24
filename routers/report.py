@@ -15,7 +15,10 @@ from models.report import Report, ReportEvidence
 from models.user import User
 from schemas.report import ReportResponse, ReportSummaryResponse
 from services.notifications.report_notification_service import notify_report_submitted
-from services.report_storage_service import upload_report_file
+from services.report_storage_service import (
+    get_report_file_presigned_url,
+    upload_report_file,
+)
 from services.report_target_service import resolve_target_snapshot_name
 
 
@@ -26,6 +29,37 @@ ALLOWED_CATEGORIES = {"PROFANITY", "SCAM", "SPAM"}
 ALLOWED_STATUSES = {"PENDING", "IN_REVIEW", "APPROVED", "REJECTED"}
 
 MAX_REPORT_FILE_COUNT = 5
+
+
+def build_report_response(report: Report) -> ReportResponse:
+    return ReportResponse(
+        id=report.id,
+        reporter_id=report.reporter_id,
+        target_type=report.target_type,
+        target_id=report.target_id,
+        target_snapshot_name=report.target_snapshot_name,
+        category=report.category,
+        description=report.description,
+        status=report.status,
+        action_result_code=report.action_result_code,
+        admin_memo=report.admin_memo,
+        reviewed_by=report.reviewed_by,
+        reviewed_at=report.reviewed_at,
+        created_at=report.created_at,
+        updated_at=report.updated_at,
+        evidences=[
+            {
+                "id": evidence.id,
+                "object_key": evidence.object_key,
+                "original_filename": evidence.original_filename,
+                "content_type": evidence.content_type,
+                "file_size": evidence.file_size,
+                "created_at": evidence.created_at,
+                "url": get_report_file_presigned_url(evidence.object_key),
+            }
+            for evidence in report.evidences
+        ],
+    )
 
 
 async def resolve_report_target_user_id(
@@ -172,7 +206,7 @@ async def create_report(
             report=created_report,
         )
 
-        return created_report
+        return build_report_response(created_report)
 
     except HTTPException:
         await db.rollback()
@@ -208,7 +242,7 @@ async def list_my_reports(
     result = await db.execute(query)
     reports = result.scalars().unique().all()
 
-    return list(reports)
+    return [build_report_response(report) for report in reports]
 
 
 @router.get("/summary", response_model=ReportSummaryResponse)
