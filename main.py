@@ -24,6 +24,7 @@ from routers.mypage import payments as mypage_payments
 from routers.quick_match import router as quick_match_router
 
 from routers.admin_moderation_config import router as admin_mod_config_router
+from routers.admin.cloud_monitor import router as admin_cloud_monitor_router
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -235,6 +236,7 @@ app.include_router(trust_history.router, prefix="/api")
 app.include_router(mypage_payments.router, prefix="/api")
 
 app.include_router(admin_mod_config_router, prefix="/api")
+app.include_router(admin_cloud_monitor_router, prefix="/api")
 # admin handocr
 app.include_router(admin_handocr.router, prefix="/api")
 
