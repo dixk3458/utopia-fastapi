@@ -639,17 +639,12 @@ async def find_id(
 
     return FindIdResponse(email=user.email)
 
-
-# [FIX] redis key 세팅 로직 제거 — /email-verify?type=reset-password 에서만 부여
-# 기존: 이메일 존재 여부만 확인하고 바로 password_reset_verified 키 세팅
-#       → 이메일 주소만 알면 인증 없이 비밀번호 재설정 가능한 보안 취약점
 @router.post("/users/find-password", response_model=FindPasswordResponse)
 async def find_password(
     payload: FindPasswordRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    # 사용자 열거 공격(user enumeration) 방지를 위해 계정 존재 여부와 무관하게 동일 메시지 반환
-    # 실제 재설정 권한(password_reset_verified)은 /email-verify?type=reset-password 에서만 부여됩니다.
+
     return FindPasswordResponse(
         message="입력하신 이메일로 비밀번호 재설정 안내를 진행할 수 있습니다."
     )
