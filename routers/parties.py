@@ -70,12 +70,14 @@ def _service_monthly_price(service: Service | None) -> int | None:
 def _party_max_members(party: Party, service: Service | None) -> int | None:
     return party.max_members or (service.max_members if service else None)
 
-
 def _party_member_count(party: Party) -> int:
     if party.current_members is not None:
         return party.current_members
-    member_count = len(party.members) if party.members is not None else 0
-    return member_count + (1 if party.leader_id else 0)
+    active_count = sum(
+        1 for m in (party.members or [])
+        if (m.status or "active").lower() == "active"
+    )
+    return active_count + (1 if party.leader_id else 0)
 
 
 def _service_original_price(service: Service | None) -> int | None:
@@ -107,8 +109,9 @@ def _build_party_out(
         elif my_row_status:
             my_member_status = my_row_status
 
-    max_members = _party_max_members(party, svc)
-    monthly_price = round(svc.monthly_price / max_members) if svc and max_members else None
+    # [FIX] 계산 후 미사용 dead code 제거
+    # 기존: monthly_price 로컬 변수를 계산하고 PartyOut에는 party.monthly_per_person 그대로 사용
+    # party.monthly_per_person이 생성 시점에 이미 1인당 금액으로 저장되므로 직접 사용이 맞음
 
     return PartyOut(
         id=party.id,
@@ -452,7 +455,7 @@ async def apply_to_party(
             status_code=500,
             detail="파티 신청 처리 중 서버 오류가 발생했습니다.",
         )
-    
+
     await notify_party_join_request_submitted(
         db=db,
         party=party,
@@ -600,7 +603,7 @@ async def kick_member(
         await db.rollback()
         logger.error(f"Error kicking member: {e}")
         raise HTTPException(status_code=500, detail="강퇴 처리 중 오류가 발생했습니다.")
-    
+
     await notify_party_member_kicked(
         db=db,
         party=party,
@@ -728,7 +731,7 @@ async def approve_application(
         await db.rollback()
         logger.error(f"Error approving application: {e}")
         raise HTTPException(status_code=500, detail="승인 처리 중 오류가 발생했습니다.")
-    
+
     await notify_party_join_approved(
         db=db,
         party=party,
@@ -774,7 +777,7 @@ async def reject_application(
         await db.rollback()
         logger.error(f"Error rejecting application: {e}")
         raise HTTPException(status_code=500, detail="거절 처리 중 오류가 발생했습니다.")
-    
+
     await notify_party_join_request_rejected(
         db=db,
         party=party,
@@ -782,7 +785,3 @@ async def reject_application(
     )
 
     return MessageOut(message="신청을 거절했습니다.")
-
-
-
-# 파티 사용자 알림
