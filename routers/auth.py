@@ -165,7 +165,6 @@ async def refresh_token_api(
             detail="만료된 refresh token입니다.",
         )
 
-    # 채팅 IP 벤 체크
     client_ip = request.client.host if request.client else None
     if client_ip:
         is_ip_banned = await redis_client.get(f"ip:banned:{client_ip}")
@@ -596,9 +595,8 @@ async def email_request(
         "expires_in": settings.EMAIL_AUTH_TTL_SECONDS,
     }
 
-
 @router.post("/email-verify")
-async def email_verify(email: str, code: str):
+async def email_verify(email: str, code: str, type: str = "signup"):
     redis_key = get_email_auth_key(email)
     saved_code = await redis_client.get(redis_key)
     if not saved_code:
@@ -606,6 +604,14 @@ async def email_verify(email: str, code: str):
     if saved_code != code:
         raise HTTPException(status_code=400, detail="인증번호가 틀렸습니다.")
     await redis_client.delete(redis_key)
+
+    if type == "reset-password":
+        await redis_client.setex(
+            f"password_reset_verified:{email}",
+            600,
+            "true",
+        )
+
     return {"success": True, "message": "이메일 인증에 성공했습니다."}
 
 
@@ -633,23 +639,11 @@ async def find_id(
 
     return FindIdResponse(email=user.email)
 
-
 @router.post("/users/find-password", response_model=FindPasswordResponse)
 async def find_password(
     payload: FindPasswordRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(User).where(User.email == payload.email)
-    )
-    user = result.scalar_one_or_none()
-
-    if user and user.provider == "local" and user.is_active:
-        await redis_client.setex(
-            f"password_reset_verified:{payload.email}",
-            600,
-            "true",
-        )
 
     return FindPasswordResponse(
         message="입력하신 이메일로 비밀번호 재설정 안내를 진행할 수 있습니다."

@@ -73,7 +73,7 @@ def _calc_payment(
 
     discount_rate = min(discount_rate, 1.0)
     amount = round(base_amount * (1 - discount_rate))
-    commission_rate = 0.10
+    commission_rate = 0.30
     commission_amount = int(amount * commission_rate)
     discount_reason = " + ".join(reasons) if reasons else None
     return amount, commission_rate, commission_amount, discount_reason
@@ -219,8 +219,6 @@ async def card_confirm(
     )
     print(f"[PAYMENT] 유저: {current_user.id} / {current_user.nickname}")
 
-    # await verify_portone_payment(body.pg_transaction_id, body.amount)
-
     existing = await db.execute(
         select(Payment).where(Payment.pg_transaction_id == body.pg_transaction_id)
     )
@@ -280,7 +278,7 @@ async def card_confirm(
         member_user_id=current_user.id,
         member_nickname=current_user.nickname,
     )
-    
+
     print(f"[PAYMENT] 저장 완료: payment_id={payment.id}, status={payment.status}")
     return payment
 
@@ -341,12 +339,13 @@ async def transfer_register(
     await db.commit()
     await db.refresh(payment)
 
-    await notify_settlement_requested_to_member(
-        db=db,
-        party=party,
-        member_user_id=party.leader_id,
-        amount=amount,
-    )
+    if current_user.id != party.leader_id:
+        await notify_settlement_requested_to_member(
+            db=db,
+            party=party,
+            member_user_id=party.leader_id,
+            amount=amount,
+        )
 
     print(f"[PAYMENT] 저장 완료: payment_id={payment.id}, status={payment.status}")
     return payment

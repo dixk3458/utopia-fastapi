@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 import redis.asyncio as aioredis
+from jose import JWTError, jwt
 from core.config import settings
 from core.database import get_db, AsyncSessionLocal
 from models.party import Party, PartyMember, PartyChat, Service
@@ -101,6 +102,29 @@ def _serialize_member(
         "profile_image": _safe_profile_image_url(user.profile_image_key),
         "is_active": bool(user.is_active),
     }
+
+def _get_user_id_from_ws_cookie(ws: WebSocket) -> str | None:
+    """
+    WebSocket 연결의 쿠키에서 access_token을 추출하여 JWT 검증 후 user_id(str) 반환.
+    토큰이 없거나 유효하지 않으면 None 반환.
+    """
+    access_token = ws.cookies.get("access_token")
+    if not access_token:
+        return None
+    try:
+        payload = jwt.decode(
+            access_token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+        )
+        if payload.get("type") != "access":
+            return None
+        user_id_str = payload.get("sub", "")
+        # UUID 형식 검증
+        uuid.UUID(user_id_str)
+        return user_id_str
+    except (JWTError, ValueError):
+        return None
 
 
 # ── 3단계 탐지 파이프라인 ────────────────────────────────────
@@ -298,8 +322,8 @@ async def _flag_chat_in_db(
             if chat:
                 chat.is_flagged = True
                 chat.flag_reason = reason
-                chat.flag_confidence = score    # 2단계만 값, 나머지 None
-                chat.flag_stage = stage         # 탐지 단계
+                chat.flag_confidence = score
+                chat.flag_stage = stage
                 chat.moderation_status = moderation_status
                 await db.commit()
     except Exception as e:
@@ -590,13 +614,12 @@ async def websocket_chat(
     party_id: str,
     ws: WebSocket,
     nickname: str = Query(default="익명"),
-    user_id: str = Query(default="guest"),
 ):
-    safe_user_id = user_id
-    if user_id == "undefined" or not user_id:
-        safe_user_id = "guest"
+    # JWT 쿠키에서 user_id 추출 (검증 실패 시 None)
+    jwt_user_id = _get_user_id_from_ws_cookie(ws)
+    safe_user_id = jwt_user_id if jwt_user_id else "guest"
 
-    # 멤버 검증
+    # 멤버 검증 (로그인 유저만)
     if safe_user_id != "guest":
         try:
             party_uuid = uuid.UUID(party_id)
