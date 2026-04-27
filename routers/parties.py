@@ -547,7 +547,8 @@ async def leave_party(
     try:
         member.status = "left"
         member.left_at = func.now()
-        party.current_members = max(0, (party.current_members or 1) - 1)
+        current = party.current_members if party.current_members is not None else _party_member_count(party)
+        party.current_members = max(0, current - 1)
 
         await create_activity_log(
             db=db,
@@ -593,7 +594,8 @@ async def kick_member(
     try:
         target.status = "kicked"
         target.left_at = func.now()
-        party.current_members = max(0, (party.current_members or 1) - 1)
+        current = party.current_members if party.current_members is not None else _party_member_count(party)
+        party.current_members = max(0, current - 1)
         await db.commit()
     except Exception as e:
         await db.rollback()

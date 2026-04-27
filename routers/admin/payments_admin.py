@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -104,6 +105,29 @@ from .deps import (
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+DISPLAY_COMMISSION_RATE = 0.10
+
+
+def _extract_discount_rate(discount_reason: str | None, service: Service | None) -> float:
+    if not discount_reason:
+        return 0.0
+
+    total = 0.0
+
+    if "방장 할인" in discount_reason and service and service.leader_discount_rate is not None:
+        total += float(service.leader_discount_rate)
+
+    if "추천인 할인" in discount_reason and service and service.referral_discount_rate is not None:
+        total += float(service.referral_discount_rate)
+
+    if total > 0:
+        return min(total, 1.0)
+
+    matches = re.findall(r"(\d+)%", discount_reason)
+    if not matches:
+        return 0.0
+    return min(sum(int(match) for match in matches) / 100, 1.0)
+
 class AdminPaymentRecordOut(_BaseModel):
     id: str
     userId: str
@@ -137,54 +161,6 @@ class AdminPaymentListOut(_BaseModel):
     totalPages: int
 
 
-def _admin_payment_total_price(
-    payment: Payment,
-    party: Party,
-    service: Service | None,
-) -> int:
-    if service and service.monthly_price:
-        return int(service.monthly_price)
-    if payment.base_price:
-        return int(payment.base_price)
-    if party.monthly_per_person and party.max_members:
-        return int(party.monthly_per_person * party.max_members)
-    return int(payment.amount)
-
-
-def _admin_payment_per_person_price(
-    payment: Payment,
-    party: Party,
-    service: Service | None,
-) -> int:
-    total_price = _admin_payment_total_price(payment, party, service)
-    max_members = int(party.max_members or 0)
-    if max_members > 0:
-        return max(1, round(total_price / max_members))
-    if party.monthly_per_person:
-        return int(party.monthly_per_person)
-    return int(payment.amount)
-
-
-def _admin_payment_display_amount(
-    payment: Payment,
-    user: User,
-    party: Party,
-    service: Service | None,
-) -> tuple[int, int]:
-    per_person_price = _admin_payment_per_person_price(payment, party, service)
-    discount_rate = 0.0
-
-    if party.leader_id == user.id and service and service.leader_discount_rate:
-        discount_rate += float(service.leader_discount_rate or 0.0)
-
-    if user.referrer_id and service and service.referral_discount_rate:
-        discount_rate += float(service.referral_discount_rate or 0.0)
-
-    discount_rate = min(discount_rate, 1.0)
-    actual_amount = round(per_person_price * (1 - discount_rate))
-    return per_person_price, actual_amount
-
-
 @router.get("/payments", response_model=AdminPaymentListOut)
 async def get_admin_payments(
     keyword: str = Query(""),
@@ -216,7 +192,6 @@ async def get_admin_payments(
 
     rows = (await db.execute(stmt)).all()
 
-    # 키워드 필터 (Python-side)
     filtered = []
     for payment, user, party, service in rows:
         if keyword:
@@ -238,9 +213,15 @@ async def get_admin_payments(
     items = []
     for payment, user, party, service in paginated:
         role = "방장" if party.leader_id == user.id else "멤버"
-        base_price, actual_amount = _admin_payment_display_amount(
-            payment, user, party, service
-        )
+
+        base_price = int(payment.base_price) if payment.base_price else int(payment.amount)
+        discount_rate = _extract_discount_rate(payment.discount_reason, service)
+        expected_amount = round(base_price * (1 - discount_rate))
+        amount = expected_amount if discount_rate > 0 else int(payment.amount)
+
+        commission_rate = DISPLAY_COMMISSION_RATE
+        commission_amount = round(amount * commission_rate)
+
         items.append(
             AdminPaymentRecordOut(
                 id=str(payment.id),
@@ -252,12 +233,10 @@ async def get_admin_payments(
                 serviceName=service.name if service else None,
                 role=role,
                 basePrice=base_price,
-                amount=actual_amount,
+                amount=amount,
                 discountReason=payment.discount_reason,
-                commissionRate=float(payment.commission_rate or 0.10),
-                commissionAmount=round(
-                    actual_amount * float(payment.commission_rate or 0.10)
-                ),
+                commissionRate=commission_rate,
+                commissionAmount=commission_amount,
                 paymentMethod=payment.payment_method,
                 status=payment.status,
                 billingMonth=payment.billing_month,
@@ -274,5 +253,3 @@ async def get_admin_payments(
         limit=limit,
         totalPages=total_pages,
     )
-
-# ── 캡챠 통계 (대시보드) ──────────────────────────────────────

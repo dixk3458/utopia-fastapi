@@ -63,7 +63,7 @@ def get_google_access_token(code: str) -> str:
     return access_token
 
 
-def get_google_user_info(access_token: str) -> dict:
+async def get_google_user_info(access_token: str) -> dict:
     try:
         response = requests.get(
             "https://openidconnect.googleapis.com/v1/userinfo",
@@ -91,7 +91,8 @@ def get_google_user_info(access_token: str) -> dict:
 
 
 # ─── Kakao ───────────────────────────────────────────────────────
-def get_kakao_access_token(code: str) -> str:
+
+async def get_kakao_access_token(code: str) -> str:
     if not settings.KAKAO_REST_API_KEY or not settings.KAKAO_REDIRECT_URI:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -131,7 +132,7 @@ def get_kakao_access_token(code: str) -> str:
     return access_token
 
 
-def get_kakao_user_info(access_token: str) -> dict:
+async def get_kakao_user_info(access_token: str) -> dict:
     try:
         response = requests.get(
             "https://kapi.kakao.com/v2/user/me",
@@ -196,7 +197,7 @@ def get_naver_access_token(code: str, state: str) -> str:
     return data["access_token"]
 
 
-def get_naver_user_info(access_token: str) -> dict:
+async def get_naver_user_info(access_token: str) -> dict:
     try:
         response = requests.get(
             "https://openapi.naver.com/v1/nid/me",

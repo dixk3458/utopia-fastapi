@@ -9,10 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
 from models.payment import Payment
-from models.party import Party, Service
+from models.party import Party, PartyMember, Service
 from models.user import User
 from services.auth_service import decode_access_token
-
 from services.notifications.settlement_notification_service import (
     notify_settlement_requested_to_member,
     notify_member_settlement_completed_to_leader,
@@ -20,30 +19,48 @@ from services.notifications.settlement_notification_service import (
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
+async def get_current_user(
+    access_token: str | None = Cookie(default=None, alias="access_token"),
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    token = access_token
+    if not token and authorization and authorization.startswith("Bearer "):
+        token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
 
-def _resolve_total_price(
-    requested_amount: int,
-    party: Party,
-    service: Service | None,
-) -> int:
-    if service and service.monthly_price:
-        return int(service.monthly_price)
-    if party.monthly_per_person and party.max_members:
-        return int(party.monthly_per_person * party.max_members)
-    return int(requested_amount)
+    try:
+        payload = decode_access_token(token)
+        user_id = uuid.UUID(payload.get("sub"))
+    except Exception:
+        raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다.")
 
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="비활성화된 계정입니다.")
+    return user
 
-def _resolve_per_person_price(
-    requested_amount: int,
-    party: Party,
-    service: Service | None,
-) -> int:
-    max_members = int(party.max_members or 0)
-    if service and service.monthly_price and max_members > 0:
-        return max(1, round(service.monthly_price / max_members))
-    if party.monthly_per_person:
-        return int(party.monthly_per_person)
-    return int(requested_amount)
+async def _has_referrer_in_party(
+    db: AsyncSession,
+    party_id: uuid.UUID,
+    leader_id: uuid.UUID,
+    referrer_id: uuid.UUID | None,
+) -> bool:
+    if referrer_id is None:
+        return False
+    if leader_id == referrer_id:
+        return True
+    result = await db.execute(
+        select(PartyMember).where(
+            PartyMember.party_id == party_id,
+            PartyMember.user_id == referrer_id,
+            PartyMember.status == "active",
+        )
+    )
+    return result.scalar_one_or_none() is not None
 
 
 def _calc_payment(
@@ -52,68 +69,57 @@ def _calc_payment(
     is_leader: bool,
     has_referrer: bool,
 ) -> tuple[int, float, int, str | None]:
-    """
-    할인 적용 후 실결제금액·수수료 계산
-    returns: (amount, commission_rate, commission_amount, discount_reason)
-    """
     discount_rate = 0.0
     reasons: list[str] = []
 
-    if is_leader:
-        leader_disc = float(service.leader_discount_rate or 0) if service else 0.0
-        if leader_disc > 0:
-            discount_rate += leader_disc
-            reasons.append(f"방장 할인 {int(leader_disc * 100)}%")
+    if is_leader and service and service.leader_discount_rate:
+        d = float(service.leader_discount_rate)
+        discount_rate += d
+        reasons.append(f"방장 할인 {int(d * 100)}%")
 
-    if has_referrer:
-        ref_disc = float(service.referral_discount_rate or 0) if service else 0.0
-        if ref_disc > 0:
-            discount_rate += ref_disc
-            reasons.append(f"추천인 할인 {int(ref_disc * 100)}%")
+    if has_referrer and service and service.referral_discount_rate:
+        d = float(service.referral_discount_rate)
+        discount_rate += d
+        reasons.append(f"추천인 할인 {int(d * 100)}%")
 
     discount_rate = min(discount_rate, 1.0)
     amount = round(base_amount * (1 - discount_rate))
-    commission_rate = 0.30
-    commission_amount = int(amount * commission_rate)
+
+    commission_rate = (
+        float(service.commission_rate)
+        if service and service.commission_rate is not None
+        else 0.30
+    )
+    commission_amount = round(amount * commission_rate / (1 + commission_rate)) if commission_rate > 0 else 0
+
     discount_reason = " + ".join(reasons) if reasons else None
     return amount, commission_rate, commission_amount, discount_reason
 
 
-async def get_current_user(
-    access_token: str | None = Cookie(default=None, alias="access_token"),
-    authorization: str | None = Header(default=None),
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    token = access_token
+# ── 포트원 검증 ──────────────────────────────────────────────────
 
-    if not token and authorization:
-        if authorization.startswith("Bearer "):
-            token = authorization.removeprefix("Bearer ").strip()
-
-    if not token:
-        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
-
+async def _verify_portone(payment_id: str, expected_amount: int) -> None:
+    from core.config import settings
     try:
-        payload = decode_access_token(token)
-        user_id_str = payload.get("sub")
-        if not user_id_str:
-            raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다.")
-        user_id = uuid.UUID(user_id_str)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"https://api.portone.io/payments/{payment_id}",
+                headers={"Authorization": f"PortOne {settings.PORTONE_API_SECRET}"},
+            )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"포트원 결제 조회 실패: {resp.text[:100]}")
+        data = resp.json()
+        if data.get("status") != "PAID":
+            raise HTTPException(status_code=400, detail=f"결제 미완료 상태: {data.get('status')}")
+        if data.get("amount", {}).get("total") != expected_amount:
+            raise HTTPException(status_code=400, detail="결제 금액 불일치")
     except HTTPException:
         raise
-    except Exception:
-        raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다.")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"포트원 검증 중 오류: {e}")
 
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
 
-    if not user:
-        raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="비활성화된 계정입니다.")
-
-    return user
-
+# ── 스키마 ───────────────────────────────────────────────────────
 
 class CardConfirmRequest(BaseModel):
     party_id: uuid.UUID
@@ -139,54 +145,7 @@ class PaymentOut(BaseModel):
         from_attributes = True
 
 
-async def verify_portone_payment(payment_id: str, expected_amount: int) -> dict:
-    try:
-        from core.config import settings
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                f"https://api.portone.io/payments/{payment_id}",
-                headers={"Authorization": f"PortOne {settings.PORTONE_API_SECRET}"},
-            )
-
-        print(f"[PORTONE] status={resp.status_code} body={resp.text[:300]}")
-
-        if resp.status_code != 200:
-            raise HTTPException(
-                status_code=400,
-                detail=f"포트원 결제 조회 실패: {resp.text[:100]}",
-            )
-
-        data = resp.json()
-        portone_status = data.get("status")
-        portone_amount = data.get("amount", {}).get("total")
-
-        print(
-            f"[PORTONE] payment status={portone_status}, "
-            f"amount={portone_amount}, expected={expected_amount}"
-        )
-
-        if portone_status != "PAID":
-            raise HTTPException(
-                status_code=400,
-                detail=f"결제 미완료 상태: {portone_status}",
-            )
-        if portone_amount != expected_amount:
-            raise HTTPException(
-                status_code=400,
-                detail=f"금액 불일치: 실제={portone_amount}, 요청={expected_amount}",
-            )
-
-        return data
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[PORTONE ERROR] {e}")
-        raise HTTPException(
-            status_code=400,
-            detail=f"포트원 검증 중 오류: {str(e)}",
-        )
-
+# ── 엔드포인트 ───────────────────────────────────────────────────
 
 @router.get("/status")
 async def get_payment_status(
@@ -203,8 +162,7 @@ async def get_payment_status(
             Payment.status == "approved",
         )
     )
-    paid = result.scalar_one_or_none() is not None
-    return {"paid": paid, "billing_month": billing_month}
+    return {"paid": result.scalar_one_or_none() is not None, "billing_month": billing_month}
 
 
 @router.post("/card/confirm", response_model=PaymentOut)
@@ -213,12 +171,6 @@ async def card_confirm(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    print(
-        f"[PAYMENT] card_confirm 요청: "
-        f"party_id={body.party_id}, pg_id={body.pg_transaction_id}, amount={body.amount}"
-    )
-    print(f"[PAYMENT] 유저: {current_user.id} / {current_user.nickname}")
-
     existing = await db.execute(
         select(Payment).where(Payment.pg_transaction_id == body.pg_transaction_id)
     )
@@ -244,18 +196,22 @@ async def card_confirm(
         raise HTTPException(status_code=404, detail="파티를 찾을 수 없습니다.")
 
     service = await db.get(Service, party.service_id) if party.service_id else None
-    is_leader = (party.leader_id == current_user.id)
-    has_referrer = (current_user.referrer_id is not None)
-    total_price = _resolve_total_price(body.amount, party, service)
-    per_person_price = _resolve_per_person_price(body.amount, party, service)
-    amount, commission_rate, commission_amount, discount_reason = _calc_payment(
-        per_person_price, service, is_leader, has_referrer
+    is_leader = party.leader_id == current_user.id
+    has_referrer = await _has_referrer_in_party(
+        db, body.party_id, party.leader_id, current_user.referrer_id
     )
+
+    base_price = int(party.monthly_per_person) if party.monthly_per_person else 0
+    amount, commission_rate, commission_amount, discount_reason = _calc_payment(
+        base_price, service, is_leader, has_referrer
+    )
+
+    await _verify_portone(body.pg_transaction_id, amount)
 
     payment = Payment(
         user_id=current_user.id,
         party_id=body.party_id,
-        base_price=total_price,
+        base_price=base_price,
         commission_rate=commission_rate,
         commission_amount=commission_amount,
         discount_reason=discount_reason,
@@ -278,8 +234,6 @@ async def card_confirm(
         member_user_id=current_user.id,
         member_nickname=current_user.nickname,
     )
-
-    print(f"[PAYMENT] 저장 완료: payment_id={payment.id}, status={payment.status}")
     return payment
 
 
@@ -289,9 +243,6 @@ async def transfer_register(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    print(f"[PAYMENT] transfer_register 요청: party_id={body.party_id}, amount={body.amount}")
-    print(f"[PAYMENT] 유저: {current_user.id} / {current_user.nickname}")
-
     now = datetime.now(timezone.utc)
     billing_month = now.strftime("%Y-%m")
 
@@ -311,18 +262,20 @@ async def transfer_register(
         raise HTTPException(status_code=404, detail="파티를 찾을 수 없습니다.")
 
     service = await db.get(Service, party.service_id) if party.service_id else None
-    is_leader = (party.leader_id == current_user.id)
-    has_referrer = (current_user.referrer_id is not None)
-    total_price = _resolve_total_price(body.amount, party, service)
-    per_person_price = _resolve_per_person_price(body.amount, party, service)
+    is_leader = party.leader_id == current_user.id
+    has_referrer = await _has_referrer_in_party(
+        db, body.party_id, party.leader_id, current_user.referrer_id
+    )
+
+    base_price = int(party.monthly_per_person) if party.monthly_per_person else 0
     amount, commission_rate, commission_amount, discount_reason = _calc_payment(
-        per_person_price, service, is_leader, has_referrer
+        base_price, service, is_leader, has_referrer
     )
 
     payment = Payment(
         user_id=current_user.id,
         party_id=body.party_id,
-        base_price=total_price,
+        base_price=base_price,
         commission_rate=commission_rate,
         commission_amount=commission_amount,
         discount_reason=discount_reason,
@@ -346,8 +299,6 @@ async def transfer_register(
             member_user_id=party.leader_id,
             amount=amount,
         )
-
-    print(f"[PAYMENT] 저장 완료: payment_id={payment.id}, status={payment.status}")
     return payment
 
 
@@ -371,13 +322,11 @@ async def approve_transfer(
     await db.commit()
 
     user = await db.get(User, payment.user_id)
-
+    party = await db.get(Party, payment.party_id)
     await notify_member_settlement_completed_to_leader(
         db=db,
-        party=await db.get(Party, payment.party_id),
+        party=party,
         member_user_id=payment.user_id,
         member_nickname=user.nickname if user else None,
     )
-
-    print(f"[PAYMENT] 관리자 승인: payment_id={payment_id}")
     return {"message": "승인 완료", "payment_id": str(payment_id)}
