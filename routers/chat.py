@@ -13,6 +13,7 @@ from core.config import settings
 from core.database import get_db, AsyncSessionLocal
 from core.security import get_current_user_optional
 from models.party import Party, PartyMember, PartyChat, Service
+from models.payment import Payment
 from models.user import User
 from models.refresh_token import RefreshToken
 from services.mypage.profile_service import _build_profile_image_url
@@ -91,6 +92,7 @@ def _serialize_member(
     role: str,
     status: str,
     joined_at: datetime | None,
+    payment_status: str | None = None,
 ) -> dict:
     return {
         "user_id": str(user.id),
@@ -101,6 +103,7 @@ def _serialize_member(
         "trust_score": float(user.trust_score) if user.trust_score is not None else None,
         "joined_at": joined_at.isoformat() if joined_at else None,
         "profile_image": _safe_profile_image_url(user.profile_image_key),
+        "payment_status": payment_status,
         "is_active": bool(user.is_active),
     }
 
@@ -135,12 +138,20 @@ async def check_message(content: str) -> dict:
     config = await get_config()
     stripped = content.strip()
 
-    # 1단계: 규칙 기반
+    # 1단계: 규칙 기반 — 완전일치가 아닌 포함 여부로 검사
     if config.get("stage1_enabled", True):
-        if stripped in config.get("whitelist", []):
-            return {"violation": False, "severe": False, "reason": "", "stage": 1, "score": None}
-        if stripped in config.get("blacklist", []):
+        whitelist = config.get("whitelist", [])
+        blacklist = config.get("blacklist", [])
+
+        has_blacklist = any(w in stripped for w in blacklist)
+        has_whitelist = any(w in stripped for w in whitelist)
+
+        # blacklist 우선: 욕설 포함이면 즉시 차단
+        if has_blacklist:
             return {"violation": True, "severe": True, "reason": "욕설 축약어", "stage": 1, "score": None}
+        # whitelist만 포함: 정상 처리 (ㅋㅋ 재밌다 등 일상 표현)
+        if has_whitelist:
+            return {"violation": False, "severe": False, "reason": "", "stage": 1, "score": None}
 
     # 2단계: GPU 서버 ML
     if config.get("stage2_enabled", True) and ML_SERVER_URL:
@@ -151,11 +162,13 @@ async def check_message(content: str) -> dict:
                 label = ml["label"]
                 score = ml["score"]
                 pass_t = config.get("stage2_pass_threshold", 0.75)
-                block_t = config.get("stage2_block_threshold", 0.92)
+                block_t = config.get("stage2_block_threshold", 0.97)  # 기본값 상향
 
-                if label == "none" or score < pass_t:
+                # none 라벨이어도 score가 확실할 때만 통과 — 애매하면 3단계로
+                if label == "none" and score >= pass_t:
                     return {"violation": False, "severe": False, "reason": "", "stage": 2, "score": score}
-                if score >= block_t:
+                # 욕설 라벨이고 score가 block_t 이상일 때만 즉시 차단
+                if label != "none" and score >= block_t:
                     return {
                         "violation": True,
                         "severe": label == "hate",
@@ -163,6 +176,7 @@ async def check_message(content: str) -> dict:
                         "stage": 2,
                         "score": score,
                     }
+                # 그 외 모든 애매한 경우는 3단계(Ollama) 문맥 판단으로 위임
         except Exception:
             pass
 
@@ -563,6 +577,23 @@ async def get_party_info(
         .order_by(PartyMember.joined_at.asc())
     )
     rows = result.all()
+    billing_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    member_user_ids = [user.id for _, user in rows]
+    if party.host:
+        member_user_ids.append(party.host.id)
+    unique_member_user_ids = list({user_id for user_id in member_user_ids})
+
+    paid_user_ids: set[uuid.UUID] = set()
+    if unique_member_user_ids:
+        paid_result = await db.execute(
+            select(Payment.user_id).where(
+                Payment.party_id == party_id,
+                Payment.billing_month == billing_month,
+                Payment.status == "approved",
+                Payment.user_id.in_(unique_member_user_ids),
+            )
+        )
+        paid_user_ids = set(paid_result.scalars().all())
 
     members = [
         _serialize_member(
@@ -570,6 +601,7 @@ async def get_party_info(
             role=member.role,
             status=member.status,
             joined_at=member.joined_at,
+            payment_status="completed" if user.id in paid_user_ids else "pending",
         )
         for member, user in rows
     ]
@@ -582,6 +614,7 @@ async def get_party_info(
                 role="leader",
                 status="active",
                 joined_at=party.created_at,
+                payment_status="completed" if party.host.id in paid_user_ids else "pending",
             ),
         )
 
