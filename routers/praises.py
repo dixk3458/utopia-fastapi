@@ -1,5 +1,3 @@
-# routers/praises.py
-
 import math
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -7,9 +5,10 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from core.database import get_db
 from core.security import get_current_user
@@ -17,6 +16,7 @@ from models.party import Party, PartyMember
 from models.user import User
 from models.user_praise import UserPraise
 from models.mypage.trust_score import TrustScore
+from services.mypage.profile_service import _build_profile_image_url
 
 
 router = APIRouter(prefix="/praises", tags=["praises"])
@@ -24,9 +24,6 @@ router = APIRouter(prefix="/praises", tags=["praises"])
 PRAISE_COOLDOWN_DAYS = 30
 PRAISE_TRUST_DELTA = 0.5
 DEFAULT_TRUST_SCORE = 36.5
-
-# 신뢰도 최대값 정책은 제공된 정보만으로는 잘 모르겠습니다.
-# 일반적인 0~100 점수 체계라면 100.0 상한을 두는 게 안전합니다.
 MAX_TRUST_SCORE = 100.0
 
 
@@ -37,6 +34,8 @@ PraiseType = Literal[
     "good_mood",
     "custom",
 ]
+
+PraiseDirection = Literal["received", "sent"]
 
 
 class PraiseCreateRequest(BaseModel):
@@ -65,6 +64,27 @@ class PraiseAvailabilityResponse(BaseModel):
     remaining_days: int = 0
 
 
+class MyPraiseItemResponse(BaseModel):
+    id: uuid.UUID
+
+    from_user_id: uuid.UUID
+    from_nickname: str | None = None
+    from_profile_image: str | None = None
+
+    to_user_id: uuid.UUID
+    to_nickname: str | None = None
+    to_profile_image: str | None = None
+
+    praise_type: str
+    message: str | None = None
+    created_at: datetime
+
+
+class MyPraisesResponse(BaseModel):
+    items: list[MyPraiseItemResponse]
+    total: int
+
+
 def _now_naive_utc() -> datetime:
     """
     user_praises.created_at이 timestamp without time zone 이므로
@@ -75,6 +95,13 @@ def _now_naive_utc() -> datetime:
 
 def _next_available_at(created_at: datetime) -> datetime:
     return created_at + timedelta(days=PRAISE_COOLDOWN_DAYS)
+
+
+def _safe_profile_image_url(profile_image_key: str | None) -> str | None:
+    try:
+        return _build_profile_image_url(profile_image_key)
+    except Exception:
+        return None
 
 
 async def _get_user_or_404(
@@ -223,7 +250,7 @@ async def _apply_trust_reward_for_praise(
 
     change_amount = round(new_score - previous_score, 1)
 
-    # 이미 100점이면 이력에 0.0 상승을 남기지 않도록 처리
+    # 이미 100점이면 이력에 0.0 상승을 남기지 않음
     if change_amount <= 0:
         return
 
@@ -239,6 +266,70 @@ async def _apply_trust_reward_for_praise(
             reference_id=praise_id,
             created_by=from_user_id,
         )
+    )
+
+
+@router.get(
+    "/me",
+    response_model=MyPraisesResponse,
+)
+async def get_my_praises(
+    direction: PraiseDirection = Query(default="received"),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    FromUser = aliased(User)
+    ToUser = aliased(User)
+
+    if direction == "received":
+        condition = UserPraise.to_user_id == current_user.id
+    else:
+        condition = UserPraise.from_user_id == current_user.id
+
+    total_result = await db.execute(
+        select(func.count())
+        .select_from(UserPraise)
+        .where(condition)
+    )
+    total = int(total_result.scalar_one() or 0)
+
+    result = await db.execute(
+        select(UserPraise, FromUser, ToUser)
+        .join(FromUser, UserPraise.from_user_id == FromUser.id)
+        .join(ToUser, UserPraise.to_user_id == ToUser.id)
+        .where(condition)
+        .order_by(UserPraise.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+
+    rows = result.all()
+
+    items = [
+        MyPraiseItemResponse(
+            id=praise.id,
+            from_user_id=praise.from_user_id,
+            from_nickname=from_user.nickname,
+            from_profile_image=_safe_profile_image_url(
+                from_user.profile_image_key,
+            ),
+            to_user_id=praise.to_user_id,
+            to_nickname=to_user.nickname,
+            to_profile_image=_safe_profile_image_url(
+                to_user.profile_image_key,
+            ),
+            praise_type=praise.praise_type,
+            message=praise.message,
+            created_at=praise.created_at,
+        )
+        for praise, from_user, to_user in rows
+    ]
+
+    return MyPraisesResponse(
+        items=items,
+        total=total,
     )
 
 
