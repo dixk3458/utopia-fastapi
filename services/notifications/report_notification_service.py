@@ -12,7 +12,7 @@ def _resolve_report_result_label(action_result_code: str | None, status: str | N
 
     if action_code == "WARNING":
         return "경고 조치"
-    if action_code == "PENALTY":
+    if action_code in {"TEMP_SUSPENSION", "PERMANENT_BAN", "PENALTY"}:
         return "제재 조치"
     if status_code == "REJECTED":
         return "신고가 기각되었어요"
