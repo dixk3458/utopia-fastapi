@@ -68,7 +68,8 @@ def _calc_payment(
     service: Service | None,
     is_leader: bool,
     has_referrer: bool,
-) -> tuple[int, float, int, str | None]:
+    is_quick_match: bool = False,
+) -> tuple[int, float, int, str | None, str]:
     discount_rate = 0.0
     reasons: list[str] = []
 
@@ -83,19 +84,38 @@ def _calc_payment(
         reasons.append(f"추천인 할인 {int(d * 100)}%")
 
     discount_rate = min(discount_rate, 1.0)
-    amount = round(base_amount * (1 - discount_rate))
 
-    commission_rate = (
+    base_commission_rate = (
         float(service.commission_rate)
         if service and service.commission_rate is not None
         else 0.30
     )
-    commission_amount = round(amount * commission_rate / (1 + commission_rate)) if commission_rate > 0 else 0
+
+    commission_rate = base_commission_rate
+    pricing_type = "normal"
+
+    normal_amount = round(base_amount * (1 - discount_rate))
+    amount = normal_amount
+
+    if is_quick_match and service:
+        quick_match_fee_rate = float(service.quick_match_fee_rate or 0)
+        commission_rate = base_commission_rate + quick_match_fee_rate
+        pricing_type = "quick_match"
+
+        normal_rate = 1 + base_commission_rate
+        quick_rate = 1 + commission_rate
+
+        if normal_rate > 0:
+            amount = round(normal_amount / normal_rate * quick_rate)
+
+    commission_amount = (
+        round(amount * commission_rate / (1 + commission_rate))
+        if commission_rate > 0
+        else 0
+    )
 
     discount_reason = " + ".join(reasons) if reasons else None
-    return amount, commission_rate, commission_amount, discount_reason
-
-
+    return amount, commission_rate, commission_amount, discount_reason, pricing_type
 # ── 포트원 검증 ──────────────────────────────────────────────────
 
 async def _verify_portone(payment_id: str, expected_amount: int) -> None:
@@ -164,6 +184,54 @@ async def get_payment_status(
     )
     return {"paid": result.scalar_one_or_none() is not None, "billing_month": billing_month}
 
+# 빠른매칭 사용자 성공모달 / 정산요청 표시
+@router.get("/preview")
+async def preview_payment(
+    party_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    party = await db.get(Party, party_id)
+    if not party:
+        raise HTTPException(status_code=404, detail="파티를 찾을 수 없습니다.")
+
+    service = await db.get(Service, party.service_id) if party.service_id else None
+    is_leader = party.leader_id == current_user.id
+
+    has_referrer = await _has_referrer_in_party(
+        db=db,
+        party_id=party_id,
+        leader_id=party.leader_id,
+        referrer_id=current_user.referrer_id,
+    )
+
+    base_price = int(party.monthly_per_person) if party.monthly_per_person else 0
+
+    is_quick_match = await _is_quick_match_member(
+        db=db,
+        party_id=party_id,
+        user_id=current_user.id,
+    )
+
+    amount, commission_rate, commission_amount, discount_reason, pricing_type = _calc_payment(
+        base_price,
+        service,
+        is_leader,
+        has_referrer,
+        is_quick_match,
+    )
+
+    return {
+        "party_id": party.id,
+        "base_price": base_price,
+        "amount": amount,
+        "commission_rate": commission_rate,
+        "commission_amount": commission_amount,
+        "discount_reason": discount_reason,
+        "pricing_type": pricing_type,
+        "is_quick_match": is_quick_match,
+        "quick_match_fee_rate": float(service.quick_match_fee_rate or 0) if service else 0,
+    }
 
 @router.post("/card/confirm", response_model=PaymentOut)
 async def card_confirm(
@@ -202,8 +270,15 @@ async def card_confirm(
     )
 
     base_price = int(party.monthly_per_person) if party.monthly_per_person else 0
-    amount, commission_rate, commission_amount, discount_reason = _calc_payment(
-        base_price, service, is_leader, has_referrer
+    
+    is_quick_match = await _is_quick_match_member(
+        db=db,
+        party_id=body.party_id,
+        user_id=current_user.id,
+    )
+
+    amount, commission_rate, commission_amount, discount_reason, pricing_type = _calc_payment(
+        base_price, service, is_leader, has_referrer, is_quick_match
     )
 
     await _verify_portone(body.pg_transaction_id, amount)
@@ -220,7 +295,7 @@ async def card_confirm(
         status="approved",
         billing_month=billing_month,
         paid_at=now,
-        pricing_type="normal",
+        pricing_type=pricing_type,
         pg_provider="portone",
         pg_transaction_id=body.pg_transaction_id,
     )
@@ -268,8 +343,14 @@ async def transfer_register(
     )
 
     base_price = int(party.monthly_per_person) if party.monthly_per_person else 0
-    amount, commission_rate, commission_amount, discount_reason = _calc_payment(
-        base_price, service, is_leader, has_referrer
+    is_quick_match = await _is_quick_match_member(
+        db=db,
+        party_id=body.party_id,
+        user_id=current_user.id,
+    )
+
+    amount, commission_rate, commission_amount, discount_reason, pricing_type = _calc_payment(
+        base_price, service, is_leader, has_referrer, is_quick_match
     )
 
     payment = Payment(
@@ -284,7 +365,7 @@ async def transfer_register(
         status="pending",
         billing_month=billing_month,
         paid_at=None,
-        pricing_type="normal",
+        pricing_type=pricing_type,
         pg_provider=None,
         pg_transaction_id=None,
     )
@@ -330,3 +411,19 @@ async def approve_transfer(
         member_nickname=user.nickname if user else None,
     )
     return {"message": "승인 완료", "payment_id": str(payment_id)}
+
+# 빠른매칭 참여 여부 
+async def _is_quick_match_member(
+    db: AsyncSession,
+    party_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> bool:
+    result = await db.execute(
+        select(PartyMember).where(
+            PartyMember.party_id == party_id,
+            PartyMember.user_id == user_id,
+            PartyMember.status == "active",
+            PartyMember.join_type == "quick_match",
+        )
+    )
+    return result.scalar_one_or_none() is not None
