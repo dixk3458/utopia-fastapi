@@ -158,11 +158,11 @@ async def _apply_report_penalty(
     if new_score <= 0 or warn_count >= 4:
         target_user.is_active = False
         target_user.banned_until = None
-        report.action_result_code = "PENALTY"
+        report.action_result_code = "PERMANENT_BAN"
     elif new_score < 10 or warn_count >= 3:
         target_user.is_active = False
         target_user.banned_until = datetime.now(timezone.utc) + timedelta(days=30)
-        report.action_result_code = "PENALTY"
+        report.action_result_code = "TEMP_SUSPENSION"
     else:
         report.action_result_code = "WARNING"
 
@@ -322,14 +322,14 @@ async def update_admin_report_status(
                 _resolve_auto_report_penalty(updated_report),
                 new_score,
             )
-            if updated_report.action_result_code == "PENALTY":
+            if updated_report.action_result_code in {"PERMANENT_BAN", "TEMP_SUSPENSION"}:
                 await notify_report_penalty_to_target(
                     db,
                     report=updated_report,
                     penalty_message=message,
                     penalty_code=(
                         "PERMANENT_BAN"
-                        if new_score <= 0 or (warn_count or 0) >= 4
+                        if updated_report.action_result_code == "PERMANENT_BAN"
                         else "TEMP_BAN_30_DAYS"
                     ),
                 )
