@@ -1,25 +1,34 @@
+# routers/praises.py
+
 import math
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from jose import JWTError, jwt
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.config import settings
 from core.database import get_db
+from core.security import get_current_user
 from models.party import Party, PartyMember
 from models.user import User
 from models.user_praise import UserPraise
+from models.mypage.trust_score import TrustScore
 
 
 router = APIRouter(prefix="/praises", tags=["praises"])
 
 PRAISE_COOLDOWN_DAYS = 30
+PRAISE_TRUST_DELTA = 0.5
+DEFAULT_TRUST_SCORE = 36.5
+
+# 신뢰도 최대값 정책은 제공된 정보만으로는 잘 모르겠습니다.
+# 일반적인 0~100 점수 체계라면 100.0 상한을 두는 게 안전합니다.
+MAX_TRUST_SCORE = 100.0
+
 
 PraiseType = Literal[
     "kind",
@@ -36,7 +45,7 @@ class PraiseCreateRequest(BaseModel):
     message: str | None = Field(default=None, max_length=120)
 
     # user_praises 테이블에는 저장하지 않고,
-    # 채팅방에서 칭찬하는 상황인지 검증하기 위한 값
+    # 채팅방에서 칭찬 가능한 관계인지 검증하기 위한 값
     party_id: uuid.UUID | None = None
 
 
@@ -66,64 +75,6 @@ def _now_naive_utc() -> datetime:
 
 def _next_available_at(created_at: datetime) -> datetime:
     return created_at + timedelta(days=PRAISE_COOLDOWN_DAYS)
-
-
-async def get_current_user(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    """
-    기존 websocket_chat 코드가 access_token 쿠키를 직접 읽는 방식이라,
-    HTTP 라우터도 같은 방식으로 맞춘 버전입니다.
-
-    프로젝트에 이미 get_current_user 의존성이 있다면 이 함수는 제거하고
-    기존 의존성으로 교체해도 됩니다.
-    """
-    access_token = request.cookies.get("access_token")
-
-    if not access_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="로그인이 필요합니다.",
-        )
-
-    try:
-        payload = jwt.decode(
-            access_token,
-            settings.SECRET_KEY,
-            algorithms=[settings.ALGORITHM],
-        )
-
-        if payload.get("type") != "access":
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="유효하지 않은 토큰입니다.",
-            )
-
-        user_id = uuid.UUID(payload.get("sub", ""))
-
-    except (JWTError, ValueError):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="유효하지 않은 토큰입니다.",
-        )
-
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="사용자를 찾을 수 없습니다.",
-        )
-
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="비활성화된 계정입니다.",
-        )
-
-    return user
 
 
 async def _get_user_or_404(
@@ -248,6 +199,49 @@ def _build_availability_response(
     )
 
 
+def _normalize_score(value: object) -> float:
+    if value is None:
+        return DEFAULT_TRUST_SCORE
+
+    try:
+        return round(float(value), 1)
+    except (TypeError, ValueError):
+        return DEFAULT_TRUST_SCORE
+
+
+async def _apply_trust_reward_for_praise(
+    db: AsyncSession,
+    *,
+    to_user: User,
+    from_user_id: uuid.UUID,
+    praise_id: uuid.UUID,
+) -> None:
+    previous_score = _normalize_score(to_user.trust_score)
+
+    new_score = round(previous_score + PRAISE_TRUST_DELTA, 1)
+    new_score = min(MAX_TRUST_SCORE, new_score)
+
+    change_amount = round(new_score - previous_score, 1)
+
+    # 이미 100점이면 이력에 0.0 상승을 남기지 않도록 처리
+    if change_amount <= 0:
+        return
+
+    to_user.trust_score = new_score
+
+    db.add(
+        TrustScore(
+            user_id=to_user.id,
+            previous_score=previous_score,
+            new_score=new_score,
+            change_amount=change_amount,
+            reason="칭찬을 받아 신뢰도가 상승했습니다.",
+            reference_id=praise_id,
+            created_by=from_user_id,
+        )
+    )
+
+
 @router.get(
     "/availability/{to_user_id}",
     response_model=PraiseAvailabilityResponse,
@@ -295,7 +289,7 @@ async def create_praise(
             detail="자기 자신은 칭찬할 수 없습니다.",
         )
 
-    await _get_user_or_404(db, payload.to_user_id)
+    to_user = await _get_user_or_404(db, payload.to_user_id)
 
     await _assert_same_party_context(
         db=db,
@@ -327,16 +321,30 @@ async def create_praise(
             },
         )
 
+    cleaned_message = payload.message.strip() if payload.message else None
+    if cleaned_message == "":
+        cleaned_message = None
+
     praise = UserPraise(
         from_user_id=current_user.id,
         to_user_id=payload.to_user_id,
         praise_type=payload.praise_type,
-        message=payload.message.strip() if payload.message else None,
+        message=cleaned_message,
     )
 
     db.add(praise)
 
     try:
+        # commit 전에 user_praises.id를 확보하기 위해 flush
+        await db.flush()
+
+        await _apply_trust_reward_for_praise(
+            db=db,
+            to_user=to_user,
+            from_user_id=current_user.id,
+            praise_id=praise.id,
+        )
+
         await db.commit()
         await db.refresh(praise)
 
