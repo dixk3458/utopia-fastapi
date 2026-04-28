@@ -19,6 +19,10 @@ from models.quick_match.request import QuickMatchRequest, QuickMatchRequestStatu
 from models.quick_match.result import QuickMatchResult
 from models.user import User
 from services.quick_match.embedding_service import EmbeddingService
+from services.notifications.party_notification_service import (
+    notify_quick_match_completed,
+    notify_quick_match_member_joined_to_leader,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -577,7 +581,13 @@ class QuickMatchService:
         if not request.matched_party_id:
             raise Exception("MATCHED_PARTY_NOT_FOUND")
 
-        party = await db.get(Party, request.matched_party_id)
+        party_result = await db.execute(
+            select(Party)
+            .options(selectinload(Party.host), selectinload(Party.service))
+            .where(Party.id == request.matched_party_id)
+        )
+        party = party_result.scalar_one_or_none()
+
         if not party:
             raise Exception("PARTY_NOT_FOUND")
 
@@ -658,6 +668,25 @@ class QuickMatchService:
 
             await db.commit()
             await db.refresh(new_member)
+
+            user = await db.get(User, request.user_id)
+
+
+            # 빠른매칭 알림
+            await notify_quick_match_completed(
+                db=db,
+                party=party,
+                member_user_id=request.user_id,
+                match_request_id=request.id,
+            )
+
+            await notify_quick_match_member_joined_to_leader(
+                db=db,
+                party=party,
+                member_user_id=request.user_id,
+                member_nickname=user.nickname if user else None,
+                match_request_id=request.id,
+            )
 
             elapsed = time.perf_counter() - start_time
             logger.info(
