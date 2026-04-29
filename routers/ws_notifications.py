@@ -54,8 +54,7 @@ async def notifications_websocket(websocket: WebSocket):
         await websocket.close(code=4401)
         return
 
-    client_ip = websocket.client.host if websocket.client else None
-    await notification_connection_manager.connect(user_id, websocket, ip=client_ip)
+    await notification_connection_manager.connect(user_id, websocket)
 
     try:
         async with AsyncSessionLocal() as db:
