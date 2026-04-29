@@ -441,6 +441,7 @@ async def _ban_user_ip(user_id: str) -> None:
         from services.notification_ws_service import notification_connection_manager
         user_uuid = uuid.UUID(user_id)
         async with AsyncSessionLocal() as db:
+            # 해당 유저의 최근 IP 조회
             ip_result = await db.execute(
                 select(RefreshToken.ip_address)
                 .where(
@@ -457,19 +458,27 @@ async def _ban_user_ip(user_id: str) -> None:
             # 무기한 IP 밴
             await redis_client.set(f"ip:banned:{ip}", "1")
 
-            # 같은 IP로 접속 중인 유저 전원 처리
-            same_ip_users = notification_connection_manager.get_users_by_ip(ip)
-            # 원인 제공자도 포함
-            same_ip_users.add(user_id)
+            # 같은 IP로 현재 유효한 RefreshToken이 있는 유저만 조회
+            token_rows = await db.execute(
+                select(RefreshToken.user_id)
+                .where(
+                    RefreshToken.ip_address == ip,
+                    RefreshToken.revoked_at == None,
+                    RefreshToken.expires_at > datetime.now(timezone.utc),
+                )
+                .distinct()
+            )
+            affected_user_ids = {str(row[0]) for row in token_rows.all()}
+            affected_user_ids.add(user_id)
 
-            for uid_str in same_ip_users:
+            for uid_str in affected_user_ids:
                 try:
                     uid = uuid.UUID(uid_str)
-                    # RefreshToken 전부 삭제 (강제 로그아웃)
+                    # RefreshToken 전부 삭제 → 다음 API 요청 시 자동 로그아웃
                     await db.execute(
                         RefreshToken.__table__.delete().where(RefreshToken.user_id == uid)
                     )
-                    # 알림 WS로 ip_banned 전송
+                    # WS 연결 중인 유저에게는 즉시 ip_banned 전송
                     await notification_connection_manager.send_to_user(uid, {
                         "type": "ip_banned",
                         "content": "같은 IP 사용자의 규정 위반으로 접속이 차단되었습니다.",
