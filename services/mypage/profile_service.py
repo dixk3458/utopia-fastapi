@@ -111,23 +111,23 @@ def _to_profile_response(
     referrers = referrers or []
 
     return MyPageProfileResponse(
-        user_id=str(user.id),
-        email=user.email,
-        name=user.name,
-        nickname=user.nickname,
-        phone=user.phone,
-        provider=user.provider,
-        role=user.role,
-        trust_score=float(user.trust_score),
-        profile_image=_build_profile_image_url(user.profile_image_key),
-        created_at=user.created_at,
-        total_party_participations=total_party_participations,
-        active_party_count=active_party_count,
-        recommendation_count=recommendation_count,
-        referrers=referrers,
-        referrer_count=len(referrers),
-        recent_activities=recent_activities or [],
-    )
+    user_id=str(user.id),
+    email=user.email,
+    name=user.name,
+    nickname=user.nickname,
+    phone=user.phone,
+    provider=user.provider,
+    role=user.role,
+    trust_score=float(user.trust_score),
+    profile_image=_build_profile_image_url(user.profile_image_key),
+    created_at=user.created_at,
+    total_party_participations=total_party_participations,
+    active_party_count=active_party_count,
+    recommendation_count=recommendation_count,
+    referrers=referrers,
+    referrer_count=user.referrer_count,
+    recent_activities=recent_activities or [],
+)
 
 
 async def _get_total_party_participations(
@@ -156,7 +156,7 @@ async def _get_active_party_count(
     result = await db.execute(stmt)
     return result.scalar() or 0
 
-
+# 추천 받은 수
 async def _get_recommendation_count(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -169,26 +169,38 @@ async def _get_recommendation_count(
     return result.scalar() or 0
 
 
+# 추천인 추가 - 최신순 조회 + 탈퇴 사용자 표시
 async def _get_my_referrers(
     db: AsyncSession,
     user_id: uuid.UUID,
 ) -> list[ReferrerOut]:
     stmt = (
-        select(User)
-        .join(UserReferrer, UserReferrer.referrer_id == User.id)
+        select(UserReferrer, User)
+        .join(User, UserReferrer.referrer_id == User.id)
         .where(UserReferrer.user_id == user_id)
-        .order_by(UserReferrer.created_at.asc())
+        .order_by(UserReferrer.created_at.desc(), UserReferrer.id.desc())
     )
-    result = await db.execute(stmt)
-    referrer_users = result.scalars().all()
 
-    return [
-        ReferrerOut(
-            id=str(referrer_user.id),
-            nickname=referrer_user.nickname,
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    referrers: list[ReferrerOut] = []
+
+    for _, referrer_user in rows:
+        is_deleted = (
+            not referrer_user.is_active
+            or referrer_user.nickname.startswith("deleted_")
         )
-        for referrer_user in referrer_users
-    ]
+
+        referrers.append(
+            ReferrerOut(
+                id=str(referrer_user.id),
+                nickname="탈퇴한 사용자" if is_deleted else referrer_user.nickname,
+                is_deleted=is_deleted,
+            )
+        )
+
+    return referrers
 
 
 async def _get_recent_activities(

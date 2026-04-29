@@ -42,7 +42,7 @@ from services.auth_service import (
     clear_refresh_token_cookie,
     issue_tokens_and_save,
     hash_refresh_token,
-    replace_user_referrers_service,
+    add_user_referrers_service,
 )
 from services.oauth_service import (
     get_google_access_token, get_google_user_info,
@@ -502,10 +502,11 @@ async def signup(
     db.add(new_user)
     await db.flush()
 
-    await replace_user_referrers_service(
+    await add_user_referrers_service(
         db=db,
         user_id=new_user.id,
-        referrer_nicknames=user.referrers,
+        referrer_nicknames=user.referrers or [],
+        commit=False,
     )
 
     initial_trust_history = build_initial_trust_score_history(
@@ -591,7 +592,17 @@ async def email_request(
     )
 
     fm = FastMail(conf)
-    background_tasks.add_task(fm.send_message, message)
+
+    # 1. SMTP - Backgroundtasks로 실행
+    # background_tasks.add_task(fm.send_message, message)
+
+    # 2. SMTP - Celery로 실행
+    from tasks.email_tasks import send_email_task
+    send_email_task.delay(
+        email=email,
+        subject=subject,
+        body=body
+    )
 
     return {
         "message": "인증 메일이 발송되었습니다.",

@@ -12,7 +12,7 @@ from schemas.user import (
 )
 from services.auth_service import (
     get_my_referrers_service,
-    replace_user_referrers_service,
+    add_user_referrers_service,
 )
 
 router = APIRouter(prefix="/users/me/referrers", tags=["referrers"])
@@ -46,14 +46,14 @@ async def update_my_referrers(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    referrers = await replace_user_referrers_service(
+    referrers = await add_user_referrers_service(
         db=db,
         user_id=current_user.id,
-        referrer_nicknames=payload.referrers,
+        referrer_nicknames=payload.referrers or [],
     )
 
     return UpdateMyReferrersResponse(
-        message="추천인 정보가 변경되었습니다.",
+        message="추천인이 추가되었습니다.",
         referrers=[
             ReferrerOut(
                 id=user.id,

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 class ReferrerOut(BaseModel):
     id: str
     nickname: str
+    is_deleted: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -37,11 +38,13 @@ class MyPageProfileResponse(BaseModel):
     total_party_participations: int = 0
     active_party_count: int = 0
 
-    # 나를 추천인으로 등록한 사용자 수
+    # 내가 추천받은 수
     recommendation_count: int = 0
 
-    # 내가 등록한 추천인 목록
+    # 내가 추천한 목록 (최신순 정렬)
     referrers: list[ReferrerOut] = []
+
+    # 내가 추천한 수
     referrer_count: int = 0
 
     recent_activities: list[RecentActivityItem] = []
