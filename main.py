@@ -15,7 +15,7 @@ from core.config import settings
 from core.database import AsyncSessionLocal, Base, engine
 from models.admin import ActivityLog
 
-from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report, ws_notifications, payments, admin_handocr, praises
+from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report, ws_notifications, payments, admin_handocr, praises, search
 
 from routers.mypage import profile, trust_history
 from routers.user import referrers
@@ -283,6 +283,9 @@ app.include_router(admin_handocr.router, prefix="/api")
 
 # 칭찬
 app.include_router(praises.router, prefix='/api')
+
+# 실검
+app.include_router(search.router, prefix='/api')
 
 @app.get("/api/health")
 async def health():

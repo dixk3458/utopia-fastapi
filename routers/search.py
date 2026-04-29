@@ -102,7 +102,7 @@ async def startup_event():
 # API 엔드포인트: 실시간 인기 검색어 조회
 # ─────────────────────────────────────────────
 
-@router.get("/api/search/trending")
+@router.get("/search/trending")
 async def get_trending(limit: int = 5):
     try:
         # ZREVRANGE: 점수 내림차순(가장 높은 점수부터)으로 상위 limit 개수 조회
@@ -123,7 +123,7 @@ async def get_trending(limit: int = 5):
 # API 엔드포인트: 검색어 기록 (Rate Limiting 적용)
 # ─────────────────────────────────────────────
 
-@router.post("/api/search/record")
+@router.post("/search/record")
 async def record_search(payload: RecordSearchRequest, request: Request):
     # 1. IP 추출 및 키워드 정규화
     ip = get_client_ip(request)
