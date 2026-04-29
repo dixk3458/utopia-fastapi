@@ -149,7 +149,7 @@ def _build_party_out(
         max_members=_party_max_members(party, svc),
         monthly_price=party.monthly_per_person,
         original_price=_service_original_price(svc),
-        service_total_price=svc.monthly_price if svc else None,
+        service_total_price=svc.original_price if svc else None,
         member_count=_party_member_count(party),
         logo_image_key=svc.logo_image_key if svc else None,
         logo_image_url=build_minio_asset_url(svc.logo_image_key) if svc else None,
