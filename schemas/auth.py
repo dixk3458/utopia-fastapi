@@ -1,5 +1,7 @@
-import uuid, re
+import uuid
+import re
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -15,29 +17,51 @@ class UserCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=50)
     nickname: str = Field(..., min_length=2, max_length=50)
     phone: str = Field(..., min_length=10, max_length=13)
-    referrer: Optional[str] = None
+
+    # 회원가입에서는 추천인 1명만 허용
+    # 프론트는 referrers: ["닉네임"] 형태로 보내고 있으므로 배열 구조는 유지
+    referrers: list[str] = Field(default_factory=list, max_length=1)
+
+    @field_validator("referrers")
+    @classmethod
+    def validate_referrers(cls, v: list[str]):
+        cleaned = [item.strip() for item in v if item and item.strip()]
+
+        if len(cleaned) > 1:
+            raise ValueError("회원가입 시 추천인은 1명만 입력할 수 있습니다.")
+
+        if len(cleaned) != len(set(cleaned)):
+            raise ValueError("중복된 추천인이 있습니다.")
+
+        return cleaned
 
     # 비밀번호 유효성검사
     @field_validator("password")
     @classmethod
     def validate_password(cls, v: str):
         regex = r"^(?=.*[A-Za-z])(?=.*\d)(?=.*[!@#$%^&*()_+{}\[\]:;<>,.?~\\/-]).{8,}$"
+
         if not re.match(regex, v):
             raise ValueError("비밀번호는 8자 이상, 영문/숫자/특수문자를 포함해야 합니다.")
+
         return v
 
     @field_validator("phone")
     @classmethod
     def validate_phone(cls, v: str):
         normalized = normalize_phone(v)
+
         if len(normalized) not in (10, 11):
             raise ValueError("휴대폰 번호는 10~11자리 숫자여야 합니다.")
+
         return normalized
+
 
 # 일반 로그인
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+
 
 class UserResponse(BaseModel):
     id: uuid.UUID
@@ -45,8 +69,9 @@ class UserResponse(BaseModel):
     name: Optional[str] = None
     nickname: str
     phone: Optional[str] = None
-    referrer: Optional[str] = None
+
     model_config = {"from_attributes": True}
+
 
 # 소셜 로그인
 class SocialLoginBody(BaseModel):
@@ -58,8 +83,10 @@ class SocialLoginBody(BaseModel):
     @classmethod
     def validate_oauth(cls, v: str):
         oauth = v.lower().strip()
+
         if oauth not in {"google", "kakao", "naver"}:
             raise ValueError("지원하지 않는 소셜 로그인입니다.")
+
         return oauth
 
 
@@ -69,14 +96,16 @@ class SocialSignupBody(BaseModel):
     email: Optional[EmailStr] = None
     name: Optional[str] = Field(default=None, max_length=50)
     nickname: str = Field(..., min_length=2, max_length=50)
-    phone: Optional[str] = Field(min_length=10, max_length=13)
+    phone: Optional[str] = Field(default=None, min_length=10, max_length=13)
 
     @field_validator("oauth")
     @classmethod
     def validate_oauth(cls, v: str):
         oauth = v.lower().strip()
+
         if oauth not in {"google", "kakao", "naver"}:
             raise ValueError("지원하지 않는 소셜 로그인입니다.")
+
         return oauth
 
     @field_validator("phone")
@@ -86,10 +115,11 @@ class SocialSignupBody(BaseModel):
             return None
 
         normalized = normalize_phone(v)
+
         if len(normalized) not in (10, 11):
             raise ValueError("휴대폰 번호는 10~11자리 숫자여야 합니다.")
-        return normalized
 
+        return normalized
 
 
 # 이메일 찾기
@@ -101,8 +131,10 @@ class FindIdRequest(BaseModel):
     @classmethod
     def validate_phone(cls, v: str):
         normalized = normalize_phone(v)
+
         if len(normalized) not in (10, 11):
             raise ValueError("휴대폰 번호는 10~11자리 숫자여야 합니다.")
+
         return normalized
 
 
@@ -128,10 +160,49 @@ class ResetPasswordRequest(BaseModel):
     @classmethod
     def validate_new_password(cls, v: str):
         regex = r"^(?=.*[A-Za-z])(?=.*\d)(?=.*[!@#$%^&*()_+{}\[\]:;<>,.?~\\/-]).{8,}$"
+
         if not re.match(regex, v):
             raise ValueError("비밀번호는 8자 이상, 영문/숫자/특수문자를 포함해야 합니다.")
+
         return v
 
 
 class ResetPasswordResponse(BaseModel):
     message: str
+
+
+# 추천인
+class ReferrerOut(BaseModel):
+    id: UUID
+    nickname: str
+    is_deleted: bool = False
+
+    model_config = {"from_attributes": True}
+
+
+class MyReferrersResponse(BaseModel):
+    referrers: list[ReferrerOut]
+    referrer_count: int
+
+
+class UpdateMyReferrersRequest(BaseModel):
+    # 마이페이지 추천인 추가는 한 번에 1명만 추가
+    referrers: list[str] = Field(default_factory=list, max_length=5)
+
+    @field_validator("referrers")
+    @classmethod
+    def validate_referrers(cls, v: list[str]):
+        cleaned = [item.strip() for item in v if item and item.strip()]
+
+        if len(cleaned) > 1:
+            raise ValueError("추천인은 한 번에 1명만 추가할 수 있습니다.")
+
+        if len(cleaned) != len(set(cleaned)):
+            raise ValueError("중복된 추천인이 있습니다.")
+
+        return cleaned
+
+
+class UpdateMyReferrersResponse(BaseModel):
+    message: str
+    referrers: list[ReferrerOut]

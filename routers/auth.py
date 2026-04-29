@@ -42,6 +42,7 @@ from services.auth_service import (
     clear_refresh_token_cookie,
     issue_tokens_and_save,
     hash_refresh_token,
+    add_user_referrers_service,
 )
 from services.oauth_service import (
     get_google_access_token, get_google_user_info,
@@ -462,30 +463,32 @@ async def signup(
     db: AsyncSession = Depends(get_db),
 ):
     client_ip = request.client.host if request.client else None
+
     if client_ip:
         is_ip_banned = await redis_client.get(f"ip:banned:{client_ip}")
         if is_ip_banned:
-            raise HTTPException(status_code=403, detail="이용이 제한된 계정입니다.")
-    result = await db.execute(select(User).where(User.email == user.email))
+            raise HTTPException(
+                status_code=403,
+                detail="이용이 제한된 계정입니다.",
+            )
+
+    result = await db.execute(
+        select(User).where(User.email == user.email)
+    )
     if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="이미 등록된 이메일입니다.")
-
-    result = await db.execute(select(User).where(User.nickname == user.nickname))
-    if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="이미 사용 중인 닉네임입니다.")
-
-    referrer_id = None
-
-    if user.referrer:
-        result = await db.execute(
-            select(User).where(User.nickname == user.referrer)
+        raise HTTPException(
+            status_code=400,
+            detail="이미 등록된 이메일입니다.",
         )
-        ref_user = result.scalar_one_or_none()
 
-        if not ref_user:
-            raise HTTPException(status_code=400, detail="존재하지 않는 추천인입니다.")
-
-        referrer_id = ref_user.id
+    result = await db.execute(
+        select(User).where(User.nickname == user.nickname)
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400,
+            detail="이미 사용 중인 닉네임입니다.",
+        )
 
     new_user = User(
         email=user.email,
@@ -493,11 +496,18 @@ async def signup(
         nickname=user.nickname,
         password_hash=get_password_hash(user.password),
         phone=user.phone,
-        referrer_id=referrer_id,
         provider="local",
     )
+
     db.add(new_user)
     await db.flush()
+
+    await add_user_referrers_service(
+        db=db,
+        user_id=new_user.id,
+        referrer_nicknames=user.referrers or [],
+        commit=False,
+    )
 
     initial_trust_history = build_initial_trust_score_history(
         user_id=new_user.id,
@@ -541,6 +551,14 @@ async def email_request(
     type: str = "signup",
     db: AsyncSession = Depends(get_db),
 ):
+    if type == "signup":
+        result = await db.execute(select(User).where(User.email == email))
+        if result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=400,
+                detail="이미 사용 중인 이메일입니다.",
+            )
+
     if type == "reset-password":
         result = await db.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
@@ -548,7 +566,7 @@ async def email_request(
         if not user or user.provider != "local" or not user.is_active:
             raise HTTPException(
                 status_code=404,
-                detail="가입된 계정을 찾을 수 없습니다."
+                detail="가입된 계정을 찾을 수 없습니다.",
             )
 
     auth_code = str(random.randint(100000, 999999))
@@ -574,7 +592,17 @@ async def email_request(
     )
 
     fm = FastMail(conf)
-    background_tasks.add_task(fm.send_message, message)
+
+    # 1. SMTP - Backgroundtasks로 실행
+    # background_tasks.add_task(fm.send_message, message)
+
+    # 2. SMTP - Celery로 실행
+    from tasks.email_tasks import send_email_task
+    send_email_task.delay(
+        email=email,
+        subject=subject,
+        body=body
+    )
 
     return {
         "message": "인증 메일이 발송되었습니다.",
