@@ -60,7 +60,10 @@ async def list_my_parties(
             if p.leader_id == current_user.referrer_id:
                 has_referrer_discount = True
             else:
-                member_user_ids = {m.user_id for m in (p.members or [])}
+                member_user_ids = {
+                    m.user_id for m in (p.members or [])
+                    if (m.status or "").lower() == "active"
+                }
                 has_referrer_discount = current_user.referrer_id in member_user_ids
         dumped = base.model_dump()
         dumped['has_referrer_discount'] = has_referrer_discount
