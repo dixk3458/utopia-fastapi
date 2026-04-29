@@ -283,9 +283,11 @@ class SystemLogRecordOut(BaseModel):
     id: str
     timestamp: str
     type: str
+    source: str
     message: str
     actor: str
     actorType: str
+    ipAddress: str | None = None
 
 class AdminPartyMemberOut(BaseModel):
     memberId: str        
