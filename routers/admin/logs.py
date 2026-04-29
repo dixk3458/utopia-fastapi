@@ -175,6 +175,7 @@ async def get_admin_logs(
                     if row.actor_user_id is not None
                     else "SYSTEM"
                 ),
+                source="activity_log",
                 message=row.description,
                 actor=_actor_display_name(
                     users_by_id.get(row.actor_user_id),
@@ -187,6 +188,7 @@ async def get_admin_logs(
                     if row.actor_user_id is not None
                     else "system"
                 ),
+                ipAddress=str(row.ip_address) if row.ip_address is not None else None,
             )
             for row in activity_rows
         ]
@@ -197,6 +199,7 @@ async def get_admin_logs(
                 id=str(row.id),
                 timestamp=_format_datetime(row.created_at),
                 type=row.level.upper(),
+                source="system_log",
                 message=row.message,
                 actor=_actor_display_name(
                     users_by_id.get(row.admin_id),
@@ -208,6 +211,11 @@ async def get_admin_logs(
                     if row.admin_id in admin_user_ids or row.admin_id is not None
                     else "system"
                 ),
+                ipAddress=(
+                    str((row.extra_metadata or {}).get("ip_address"))
+                    if (row.extra_metadata or {}).get("ip_address")
+                    else None
+                ),
             )
             for row in system_rows
         ]
@@ -218,12 +226,14 @@ async def get_admin_logs(
                 id=str(row.id),
                 timestamp=_format_datetime(row.created_at),
                 type="ADMIN_ACTION",
+                source="moderation_action",
                 message=f"{row.action_type}: {row.reason or '-'}",
                 actor=_actor_display_name(
                     users_by_id.get(row.admin_id),
                     "system",
                 ),
                 actorType="admin",
+                ipAddress=None,
             )
             for row in moderation_rows
         ]
