@@ -32,7 +32,7 @@ class AdminRole(Base):
     can_manage_moderation: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
-    can_approve_receipts: Mapped[bool] = mapped_column(
+    can_manage_captcha: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
     can_approve_settlements: Mapped[bool] = mapped_column(

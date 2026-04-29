@@ -233,7 +233,7 @@ def _admin_permissions_for_role(role: str) -> dict[str, Any]:
             "can_manage_quick_match": True,
             "can_manage_reports": True,
             "can_manage_moderation": True,
-            "can_approve_receipts": True,
+            "can_manage_captcha": True,
             "can_approve_settlements": True,
             "can_manage_payments": True,
             "can_manage_handocr": True,
@@ -249,7 +249,7 @@ def _admin_permissions_for_role(role: str) -> dict[str, Any]:
         "can_manage_quick_match": True,
         "can_manage_reports": True,
         "can_manage_moderation": True,
-        "can_approve_receipts": True,
+        "can_manage_captcha": True,
         "can_approve_settlements": True,
         "can_manage_payments": True,
         "can_manage_handocr": True,
@@ -443,7 +443,7 @@ def _admin_permissions_payload(payload: AdminRoleUpdateIn) -> dict[str, bool]:
         "can_manage_quick_match": payload.canManageQuickMatch,
         "can_manage_reports": payload.canManageReports,
         "can_manage_moderation": payload.canManageChatModeration,
-        "can_approve_receipts": payload.canManageCaptcha,
+        "can_manage_captcha": payload.canManageCaptcha,
         "can_approve_settlements": payload.canApproveSettlements,
         "can_manage_payments": payload.canManagePayments,
         "can_manage_handocr": payload.canManageHandOcr,
@@ -466,7 +466,7 @@ def _serialize_admin_permissions(role: AdminRole) -> AdminPermissionOut:
         canManageQuickMatch=role.can_manage_quick_match,
         canManageReports=role.can_manage_reports,
         canManageChatModeration=role.can_manage_moderation,
-        canManageCaptcha=role.can_approve_receipts,
+        canManageCaptcha=role.can_manage_captcha,
         canApproveSettlements=role.can_approve_settlements,
         canManagePayments=role.can_manage_payments,
         canManageHandOcr=role.can_manage_handocr,
@@ -488,7 +488,7 @@ def _serialize_admin_role(role: AdminRole, user: User, created_by: User | None) 
         canManageQuickMatch=role.can_manage_quick_match,
         canManageReports=role.can_manage_reports,
         canManageChatModeration=role.can_manage_moderation,
-        canManageCaptcha=role.can_approve_receipts,
+        canManageCaptcha=role.can_manage_captcha,
         canApproveSettlements=role.can_approve_settlements,
         canManagePayments=role.can_manage_payments,
         canManageHandOcr=role.can_manage_handocr,
@@ -701,7 +701,7 @@ async def require_admin_report_permission(
 async def require_admin_receipt_permission(
     admin: AdminContext = Depends(require_admin_context),
 ) -> AdminContext:
-    return _assert_admin_permission(admin, "can_approve_receipts", "영수증 승인 권한이 없습니다.")
+    return _assert_admin_permission(admin, "can_manage_captcha", "캡챠 관리 권한이 없습니다.")
 
 
 async def require_admin_settlement_permission(
