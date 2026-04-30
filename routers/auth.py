@@ -3,6 +3,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Any
 
+from celery.exceptions import CeleryError
+from kombu.exceptions import OperationalError
+from tasks.email_tasks import send_email_task
+from fastapi.concurrency import run_in_threadpool
+from core.celery_app import celery_app
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response, Cookie, Request
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
 from pydantic import BaseModel, EmailStr
@@ -28,6 +34,7 @@ from schemas.auth import (
     ResetPasswordResponse,
     SocialLoginBody,
     SocialSignupBody,
+    RandomNicknameResponse,
 )
 from services.auth_service import (
     get_password_hash,
@@ -54,6 +61,32 @@ from services.mypage.profile_service import (
 )
 
 router = APIRouter(tags=["auth"])
+
+NICKNAME_ADJECTIVES = [
+    "즐거운",
+    "신나는",
+    "따뜻한",
+    "용감한",
+    "귀여운",
+    "활발한",
+]
+
+NICKNAME_NOUNS = [
+    "고양이",
+    "토끼",
+    "여우",
+    "펭귄",
+    "호랑이",
+    "강아지",
+]
+
+
+def create_random_nickname() -> str:
+    adjective = random.choice(NICKNAME_ADJECTIVES)
+    noun = random.choice(NICKNAME_NOUNS)
+    number = random.randint(100, 9999)
+
+    return f"{adjective}{noun}{number}"
 
 conf = ConnectionConfig(
     MAIL_USERNAME=settings.MAIL_USERNAME,
@@ -597,12 +630,34 @@ async def email_request(
     # background_tasks.add_task(fm.send_message, message)
 
     # 2. SMTP - Celery로 실행
-    from tasks.email_tasks import send_email_task
-    send_email_task.delay(
-        email=email,
-        subject=subject,
-        body=body
-    )
+    try:
+        workers = await run_in_threadpool(
+            lambda: celery_app.control.ping(timeout=1.0)
+        )
+
+        if not workers:
+            await redis_client.delete(get_email_auth_key(str(email)))
+            raise HTTPException(
+                status_code=503,
+                detail="이메일 발송에 문제가 발생했습니다. 잠시 후 다시 시도해주세요."
+            )
+
+
+        send_email_task.apply_async(
+            kwargs={
+                "email": str(email),
+                "subject": subject,
+                "body": body,
+            }
+        )
+    except (OperationalError, CeleryError):
+        # Redis에 저장된 인증코드 롤백
+        await redis_client.delete(get_email_auth_key(str(email)))
+
+        raise HTTPException(
+            status_code=503,
+            detail="메일 발송 서버가 준비되지 않았습니다. 잠시 후 다시 시도해주세요.",
+        )
 
     return {
         "message": "인증 메일이 발송되었습니다.",
@@ -652,6 +707,22 @@ async def find_id(
         return FindIdResponse(message="일치하는 계정을 찾지 못했습니다.")
 
     return FindIdResponse(email=user.email)
+
+@router.get("/users/random-nickname", response_model=RandomNicknameResponse)
+async def get_random_nickname(db: AsyncSession = Depends(get_db)):
+    for _ in range(10):
+        nickname = create_random_nickname()
+
+        result = await db.execute(
+            select(User).where(User.nickname == nickname)
+        )
+
+        if result.scalar_one_or_none() is None:
+            return RandomNicknameResponse(nickname=nickname)
+
+    fallback_nickname = f"user_{uuid.uuid4().hex[:8]}"
+
+    return RandomNicknameResponse(nickname=fallback_nickname)
 
 @router.post("/users/find-password", response_model=FindPasswordResponse)
 async def find_password(
