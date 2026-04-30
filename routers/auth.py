@@ -3,6 +3,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Any
 
+from celery.exceptions import CeleryError
+from kombu.exceptions import OperationalError
+from tasks.email_tasks import send_email_task
+from fastapi.concurrency import run_in_threadpool
+from core.celery_app import celery_app
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response, Cookie, Request
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
 from pydantic import BaseModel, EmailStr
@@ -597,12 +603,34 @@ async def email_request(
     # background_tasks.add_task(fm.send_message, message)
 
     # 2. SMTP - Celery로 실행
-    from tasks.email_tasks import send_email_task
-    send_email_task.delay(
-        email=email,
-        subject=subject,
-        body=body
-    )
+    try:
+        workers = await run_in_threadpool(
+            lambda: celery_app.control.ping(timeout=1.0)
+        )
+
+        if not workers:
+            await redis_client.delete(get_email_auth_key(str(email)))
+            raise HTTPException(
+                status_code=503,
+                detail="이메일 발송에 문제가 발생했습니다. 잠시 후 다시 시도해주세요."
+            )
+
+
+        send_email_task.apply_async(
+            kwargs={
+                "email": str(email),
+                "subject": subject,
+                "body": body,
+            }
+        )
+    except (OperationalError, CeleryError):
+        # Redis에 저장된 인증코드 롤백
+        await redis_client.delete(get_email_auth_key(str(email)))
+
+        raise HTTPException(
+            status_code=503,
+            detail="메일 발송 서버가 준비되지 않았습니다. 잠시 후 다시 시도해주세요.",
+        )
 
     return {
         "message": "인증 메일이 발송되었습니다.",
