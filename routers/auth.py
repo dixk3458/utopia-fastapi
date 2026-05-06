@@ -850,8 +850,8 @@ async def login(
     user = result.scalar_one_or_none()
 
     if not user:
-        raise HTTPException(status_code=401, detail="아이디가 틀렸습니다.")
-    if user.provider != "local" or user.password_hash is None:
+        raise HTTPException(status_code=401, detail="존재하지 않는 이메일입니다.")
+    if user.provider != "oauth" and user.password_hash is None:
         raise HTTPException(status_code=400, detail="소셜 로그인으로 가입한 계정입니다.")
     if not verify_password(user_credentials.password, user.password_hash):
         raise HTTPException(status_code=401, detail="비밀번호가 틀렸습니다.")
