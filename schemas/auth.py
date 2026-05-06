@@ -89,7 +89,7 @@ class SocialLoginBody(BaseModel):
 
         return oauth
 
-
+# 소셜 회원가입
 class SocialSignupBody(BaseModel):
     oauth: str = Field(..., min_length=1, max_length=20)
     oauth_id: str = Field(..., min_length=1, max_length=255)
@@ -141,15 +141,6 @@ class FindIdRequest(BaseModel):
 class FindIdResponse(BaseModel):
     email: Optional[EmailStr] = None
     message: Optional[str] = None
-
-
-# 비밀번호 찾기
-class FindPasswordRequest(BaseModel):
-    email: EmailStr
-
-
-class FindPasswordResponse(BaseModel):
-    message: str
 
 
 class ResetPasswordRequest(BaseModel):
