@@ -11,7 +11,14 @@ from core.config import settings
 from models.party import PartyChat, PartyMember
 from models.user import User
 from models.moderation_config import ModerationConfig
+from models.admin import ActivityLog
 import redis.asyncio as aioredis
+
+
+async def _log(action_type: str, description: str):
+    async with AsyncSessionLocal() as _db:
+        _db.add(ActivityLog(action_type=action_type, description=description))
+        await _db.commit()
 
 router = APIRouter(prefix="/admin/moderation", tags=["admin-moderation"])
 redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
@@ -56,6 +63,7 @@ async def get_config() -> dict:
 
     # 3) DB도 없으면 DEFAULT로 초기 저장
     await save_config(DEFAULT_CONFIG.copy())
+    await _log("모더레이션 설정 변경", "모더레이션 설정 초기화")
     return DEFAULT_CONFIG.copy()
 
 
@@ -102,6 +110,7 @@ async def update_moderation_config(body: ConfigUpdate, _: object = Depends(requi
     update_data = body.model_dump(exclude_none=True)
     config.update(update_data)
     await save_config(config)
+    await _log("모더레이션 설정 변경", f"모더레이션 설정 수정: {list(update_data.keys())}")
     return config
 
 
@@ -123,6 +132,7 @@ async def add_whitelist(body: WordBody, _: object = Depends(require_admin_modera
     if body.word not in config["whitelist"]:
         config["whitelist"].append(body.word)
         await save_config(config)
+        await _log("모더레이션 설정 변경", f"허용 단어 추가: {body.word}")
     return config["whitelist"]
 
 
@@ -131,6 +141,7 @@ async def remove_whitelist(word: str, _: object = Depends(require_admin_moderati
     config = await get_config()
     config["whitelist"] = [w for w in config["whitelist"] if w != word]
     await save_config(config)
+    await _log("모더레이션 설정 변경", f"허용 단어 삭제: {word}")
     return config["whitelist"]
 
 
@@ -140,6 +151,7 @@ async def add_blacklist(body: WordBody, _: object = Depends(require_admin_modera
     if body.word not in config["blacklist"]:
         config["blacklist"].append(body.word)
         await save_config(config)
+        await _log("모더레이션 설정 변경", f"금지 단어 추가: {body.word}")
     return config["blacklist"]
 
 
@@ -148,6 +160,7 @@ async def remove_blacklist(word: str, _: object = Depends(require_admin_moderati
     config = await get_config()
     config["blacklist"] = [w for w in config["blacklist"] if w != word]
     await save_config(config)
+    await _log("모더레이션 설정 변경", f"금지 단어 삭제: {word}")
     return config["blacklist"]
 
 
@@ -209,6 +222,7 @@ async def unblock_chat_user(user_id: str, _: object = Depends(require_admin_mode
     except Exception as e:
         print(f"[UNBLOCK USER ERROR] {e}")
 
+    await _log("모더레이션 관리", f"채팅 차단 사용자 {user_id} 해제")
     return {"unblocked": True, "user_id": user_id}
 
 
@@ -228,4 +242,5 @@ async def list_chat_bans(_: object = Depends(require_admin_moderation_permission
 async def unblock_ip_ban(ip: str, _: object = Depends(require_admin_moderation_permission)):
     """채팅 IP 벤 해제"""
     await redis_client.delete(f"ip:banned:{ip}")
+    await _log("모더레이션 관리", f"채팅 차단 IP {ip} 해제")
     return {"unblocked": True, "ip": ip}

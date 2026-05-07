@@ -16,7 +16,15 @@ from minio import Minio
 from minio.error import S3Error
 
 from core.config import settings
+from core.database import AsyncSessionLocal
+from models.admin import ActivityLog
 from routers.admin.deps import require_admin_handocr_permission
+
+
+async def _log(action_type: str, description: str):
+    async with AsyncSessionLocal() as _db:
+        _db.add(ActivityLog(action_type=action_type, description=description))
+        await _db.commit()
 
 router = APIRouter(
     prefix="/admin/handocr",
@@ -385,6 +393,7 @@ async def release_admin_handocr_block(ip: str):
     block_key = f"captcha:block:{ip}"
     deleted = await redis_client.delete(block_key)
 
+    await _log("HandOCR 관리", f"HandOCR 차단 IP {ip} 해제")
     return {
         "success": True,
         "ip": ip,
@@ -401,6 +410,7 @@ async def reset_admin_handocr_ip_failures(ip: str):
         f"captcha:start:{ip}:10m",
     )
 
+    await _log("HandOCR 관리", f"HandOCR IP {ip} 실패 횟수 초기화")
     return {
         "success": True,
         "ip": ip,
@@ -468,6 +478,7 @@ async def expire_admin_handocr_session(session_id: str):
     if session_ip:
         deleted_count += await redis_client.delete(f"captcha:active_session:{session_ip}")
 
+    await _log("HandOCR 관리", f"HandOCR 세션 {session_id[:8]}... 강제 만료 처리")
     return {
         "success": True,
         "session_id": session_id,

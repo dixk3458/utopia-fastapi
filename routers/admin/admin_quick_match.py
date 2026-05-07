@@ -8,9 +8,9 @@ from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from core.database import get_db
+from core.database import get_db, AsyncSessionLocal
 from core.security import require_user
-from models.admin import AdminRole
+from models.admin import AdminRole, ActivityLog
 from models.party import Party
 from models.quick_match.candidate import QuickMatchCandidate
 from models.quick_match.embedding import PartyMatchEmbedding
@@ -30,6 +30,12 @@ from schemas.admin_quick_match import (
 from services.quick_match.embedding_service import EmbeddingService
 from services.quick_match.party_embedding_service import PartyEmbeddingService
 from services.quick_match.quick_match_service import QuickMatchService
+
+
+async def _log(actor_id, action_type: str, description: str):
+    async with AsyncSessionLocal() as _db:
+        _db.add(ActivityLog(actor_user_id=actor_id, action_type=action_type, description=description))
+        await _db.commit()
 
 router = APIRouter(
     prefix="/admin/quick-match",
@@ -407,6 +413,7 @@ async def update_admin_quick_match_policy(
 ):
     global CURRENT_POLICY
     CURRENT_POLICY = payload
+    await _log(_.id, "빠른매칭 설정 변경", "빠른매칭 정책 수정")
     return AdminQuickMatchPolicyResponse(policy=CURRENT_POLICY)
 
 
@@ -420,6 +427,7 @@ async def retry_admin_quick_match_request(
     _: User = Depends(require_admin_user),
 ):
     await quick_match_service.retry_match(db=db, request_id=request_id)
+    await _log(None, "빠른매칭 관리", f"빠른매칭 요청 {request_id} 재시도 처리")
     return AdminQuickMatchActionResponse(
         success=True,
         message="재시도 요청이 처리되었습니다.",
@@ -440,6 +448,7 @@ async def force_fail_admin_quick_match_request(
         request_id=request_id,
         reason="ADMIN_FORCE_FAILED",
     )
+    await _log(None, "빠른매칭 관리", f"빠른매칭 요청 {request_id} 강제 실패 처리")
     return AdminQuickMatchActionResponse(
         success=True,
         message="요청을 강제 실패 처리했습니다.",
@@ -506,6 +515,7 @@ async def regenerate_user_quick_match_embedding(
 
     await db.commit()
 
+    await _log(None, "빠른매칭 관리", f"사용자 {user_id} 임베딩 재생성")
     return AdminQuickMatchActionResponse(
         success=True,
         message="사용자 임베딩을 재생성했습니다.",
@@ -534,6 +544,7 @@ async def regenerate_party_quick_match_embedding(
 
     await db.commit()
 
+    await _log(None, "빠른매칭 관리", f"파티 {party_id} 임베딩 재생성")
     return AdminQuickMatchActionResponse(
         success=True,
         message="파티 임베딩을 재생성했습니다.",
