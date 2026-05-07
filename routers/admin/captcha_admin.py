@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from core.config import settings
-from core.database import get_db
+from core.database import get_db, AsyncSessionLocal
 from core.redis_client import redis_client
 from core.minio_assets import build_minio_asset_url
 from core.security import require_user
@@ -127,6 +127,15 @@ async def toggle_shadow_mode(current_user: User = Depends(require_user)):
     settings.LSTM_SHADOW_MODE = not settings.LSTM_SHADOW_MODE
     new_state = settings.LSTM_SHADOW_MODE
 
+    async with AsyncSessionLocal() as _db:
+        await _append_activity_log(
+            _db,
+            actor_user_id=current_user.id,
+            action_type="캡챠 설정 변경",
+            description=f"LSTM 섀도우 모드 {'ON' if new_state else 'OFF'}으로 변경",
+            ip_address=None,
+        )
+        await _db.commit()
     return {
         "shadow_mode": new_state,
         "message": (
@@ -201,6 +210,15 @@ async def unblock_ip(ip: str, current_user: User = Depends(require_user)):
         if result:
             deleted_keys.append(key)
 
+    async with AsyncSessionLocal() as _db:
+        await _append_activity_log(
+            _db,
+            actor_user_id=current_user.id,
+            action_type="캡챠 설정 변경",
+            description=f"캡챠 차단 IP {ip} 해제",
+            ip_address=None,
+        )
+        await _db.commit()
     return {
         "ip": ip,
         "unblocked": len(deleted_keys) > 0,
@@ -223,6 +241,15 @@ async def unblock_all_ips(current_user: User = Depends(require_user)):
             if cursor == 0:
                 break
 
+    async with AsyncSessionLocal() as _db:
+        await _append_activity_log(
+            _db,
+            actor_user_id=current_user.id,
+            action_type="캡챠 설정 변경",
+            description=f"캡챠 차단 IP 전체 해제 ({total_deleted}건)",
+            ip_address=None,
+        )
+        await _db.commit()
     return {
         "total_deleted": total_deleted,
         "message": f"캡챠 제재 {total_deleted}건 전체 해제 완료",
@@ -294,6 +321,15 @@ async def update_captcha_config(
     knn_w = getattr(settings, "KNN_WEIGHT", 0.2)
     rule_w = round(1.0 - lstm_w - knn_w, 4)
 
+    async with AsyncSessionLocal() as _db:
+        await _append_activity_log(
+            _db,
+            actor_user_id=current_user.id,
+            action_type="캡챠 설정 변경",
+            description=f"캡챠 가중치/임계값 변경: {', '.join(updated)}" if updated else "캡챠 설정 변경 (변경 없음)",
+            ip_address=None,
+        )
+        await _db.commit()
     return {
         "message": f"변경 완료: {', '.join(updated)}" if updated else "변경 사항 없음",
         "lstm_weight": lstm_w,
@@ -322,10 +358,28 @@ async def force_challenge(
     if target_ip:
         # 특정 IP만
         await redis_client.setex(f"captcha:force-challenge:{target_ip}", 300, "1")
+        async with AsyncSessionLocal() as _db:
+            await _append_activity_log(
+                _db,
+                actor_user_id=current_user.id,
+                action_type="캡챠 강제 발동",
+                description=f"특정 IP({target_ip})에 캡챠 챌린지 강제 발동",
+                ip_address=None,
+            )
+            await _db.commit()
         return {"message": f"{target_ip}에 챌린지 강제 발동 (5분간 유효)"}
 
     # IP 미지정 시: 와일드카드 대신 잘 알려진 방법 → 0.0.0.0 플래그
     await redis_client.setex("captcha:force-challenge:*", 300, "1")
+    async with AsyncSessionLocal() as _db:
+        await _append_activity_log(
+            _db,
+            actor_user_id=current_user.id,
+            action_type="캡챠 강제 발동",
+            description="전체 IP에 캡챠 챌린지 강제 발동",
+            ip_address=None,
+        )
+        await _db.commit()
     return {"message": "모든 IP에 챌린지 강제 발동 (5분간 유효)"}
 
 # ─── 결제 내역 관리 ───────────────────────────────────────────────────────────
@@ -973,6 +1027,15 @@ async def deactivate_captcha_set(
                 detail="세트를 찾을 수 없거나 이미 비활성화 상태입니다",
             )
 
+        async with AsyncSessionLocal() as _db:
+            await _append_activity_log(
+                _db,
+                actor_user_id=current_user.id,
+                action_type="캡챠 설정 변경",
+                description=f"캡챠 세트 {set_id[:8]}... 비활성화",
+                ip_address=None,
+            )
+            await _db.commit()
         return {
             "set_id": set_id,
             "is_active": False,
@@ -1096,6 +1159,15 @@ async def batch_deactivate_images(
 
         await db.commit()
 
+        async with AsyncSessionLocal() as _db:
+            await _append_activity_log(
+                _db,
+                actor_user_id=current_user.id,
+                action_type="캡챠 설정 변경",
+                description=f"캡챠 이미지 {len(deactivated_images)}장 일괄 비활성화, 관련 세트 {total_sets_deactivated}개 정지",
+                ip_address=None,
+            )
+            await _db.commit()
         return {
             "deactivated_images": len(deactivated_images),
             "deactivated_sets": total_sets_deactivated,
@@ -1185,7 +1257,6 @@ async def generate_captcha_images(
         finally:
             await redis_client.delete(lock_key)
 
-    # 백그라운드 실행
     asyncio.create_task(run_generate())
 
     return {
