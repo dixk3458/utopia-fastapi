@@ -38,10 +38,6 @@ class User(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     banned_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # 신뢰도 10~20점 구간: YOLO 행동 인증 강제 발동
-    require_action_auth: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
-    # 신뢰도 10점 미만 구간: 신규 파티 참여 제한
-    party_join_blocked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
